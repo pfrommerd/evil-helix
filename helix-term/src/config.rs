@@ -288,4 +288,21 @@ mod tests {
         let default_keys = Config::default().keys;
         assert_eq!(default_keys, keymap::default_evil());
     }
+
+    #[test]
+    fn evil_defaults_render_indent_guides() {
+        assert!(Config::default().editor.indent_guides.render);
+        assert!(Config::load_test("").editor.indent_guides.render);
+        assert!(
+            !Config::load_test(
+                r#"
+                [editor]
+                evil = false
+                "#,
+            )
+            .editor
+            .indent_guides
+            .render
+        );
+    }
 }

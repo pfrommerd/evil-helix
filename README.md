@@ -42,6 +42,8 @@ These are the current differences compared to the upstream project:
 -	Adjusted defaults ([511060a](https://github.com/usagi-flow/evil-helix/commit/511060abcfcbe9377ec50e8a0ecaf4c0660776bb)):
 	-	The Helix "SEL" mode is called "VIS"
 	-	Smart tab is disabled by default
+	-	Navigation uses `j`, `k`, `l`, `;` for left, down, up, and right
+	-	Indent guides are enabled
 -	Basic Vim modeline support ([#3](https://github.com/usagi-flow/evil-helix/pull/3))
 -	Support for colored/rainbow indentation guides, _opt-in: see PR_ ([#76](https://github.com/usagi-flow/evil-helix/pull/76))
 -	If `color_modes` is enabled, color the file type in the statusline as well ([5503542](https://github.com/usagi-flow/evil-helix/commit/5503542c0314936ea91464f2944666ed42fea86c))

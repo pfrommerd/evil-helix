@@ -6,10 +6,10 @@ use helix_core::hashmap;
 
 pub fn default_evil() -> HashMap<Mode, KeyTrie> {
     let normal = keymap!({ "Normal mode"
-        "h" | "left" => move_same_line_char_left,
-        "j" | "down" => move_anchored_visual_line_down,
-        "k" | "up" => move_anchored_visual_line_up,
-        "l" | "right" => move_same_line_char_right,
+        "j" | "left" => move_same_line_char_left,
+        "k" | "down" => move_anchored_visual_line_down,
+        "l" | "up" => move_anchored_visual_line_up,
+        ";" | "right" => move_same_line_char_right,
 
         "t" => evil_find_till_char,
         "f" => evil_find_next_char,
@@ -42,8 +42,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
             "|" => goto_column,
             "e" => goto_last_line,
             "f" => goto_file,
-            "h" => goto_line_start,
-            "l" => goto_line_end,
+            "j" => goto_line_start,
+            ";" => goto_line_end,
             "s" => goto_first_nonwhitespace,
             "d" => goto_definition,
             "D" => goto_declaration,
@@ -57,8 +57,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
             "m" => goto_last_modified_file,
             "n" => goto_next_buffer,
             "p" => goto_previous_buffer,
-            "k" => move_anchored_line_up,
-            "j" => move_anchored_line_down,
+            "l" => move_anchored_line_up,
+            "k" => move_anchored_line_down,
             "." => goto_last_modification,
             "w" => goto_word,
         },
@@ -80,12 +80,11 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "A-C" => copy_selection_on_prev_line,
 
 
-        "s" => select_regex,
+        "s" => change_selection,
         "A-s" => split_selection_on_newline,
         "A-minus" => merge_selections,
         "A-_" => merge_consecutive_selections,
         "S" => split_selection,
-        ";" => collapse_selection,
         "A-;" => flip_selections,
         "A-o" | "A-up" => expand_selection,
         "A-i" | "A-down" => shrink_selection,
@@ -189,6 +188,11 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
 
         "A-:" => ensure_selections_forward,
 
+        "D" => [ensure_selections_forward, extend_to_line_end, delete_selection],
+        "H" => goto_window_top,
+        "M" => goto_window_center,
+        "L" => goto_window_bottom,
+
         "esc" => normal_mode,
         "C-b" | "pageup" => page_up,
         "C-f" | "pagedown" => page_down,
@@ -204,10 +208,10 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
             "F" => goto_file_vsplit,
             "C-q" | "q" => wclose,
             "C-o" | "o" => wonly,
-            "C-h" | "h" | "left" => jump_view_left,
-            "C-j" | "j" | "down" => jump_view_down,
-            "C-k" | "k" | "up" => jump_view_up,
-            "C-l" | "l" | "right" => jump_view_right,
+            "C-j" | "j" | "left" => jump_view_left,
+            "C-k" | "k" | "down" => jump_view_down,
+            "C-l" | "l" | "up" => jump_view_up,
+            "C-;" | ";" | "right" => jump_view_right,
             "L" => swap_view_right,
             "K" => swap_view_up,
             "H" => swap_view_left,
@@ -273,10 +277,10 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
                 "F" => goto_file_vsplit,
                 "C-q" | "q" => wclose,
                 "C-o" | "o" => wonly,
-                "C-h" | "h" | "left" => jump_view_left,
-                "C-j" | "j" | "down" => jump_view_down,
-                "C-k" | "k" | "up" => jump_view_up,
-                "C-l" | "l" | "right" => jump_view_right,
+                "C-j" | "j" | "left" => jump_view_left,
+                "C-k" | "k" | "down" => jump_view_down,
+                "C-l" | "l" | "up" => jump_view_up,
+                "C-;" | ";" | "right" => jump_view_right,
                 "H" => swap_view_left,
                 "J" => swap_view_down,
                 "K" => swap_view_up,
@@ -305,8 +309,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
             "t" => align_view_top,
             "b" => align_view_bottom,
             "m" => align_view_middle,
-            "k" | "up" => scroll_up,
-            "j" | "down" => scroll_down,
+            "l" | "up" => scroll_up,
+            "k" | "down" => scroll_down,
             "C-b" | "pageup" => page_up,
             "C-f" | "pagedown" => page_down,
             "C-u" | "backspace" => page_cursor_half_up,
@@ -322,8 +326,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
             "t" => align_view_top,
             "b" => align_view_bottom,
             "m" => align_view_middle,
-            "k" | "up" => scroll_up,
-            "j" | "down" => scroll_down,
+            "l" | "up" => scroll_up,
+            "k" | "down" => scroll_down,
             "C-b" | "pageup" => page_up,
             "C-f" | "pagedown" => page_down,
             "C-u" | "backspace" => page_cursor_half_up,
@@ -365,10 +369,10 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
     });
     let mut select = normal.clone();
     select.merge_nodes(keymap!({ "Select mode"
-        "h" | "left" => extend_same_line_char_left,
-        "j" | "down" => extend_anchored_visual_line_down,
-        "k" | "up" => extend_anchored_visual_line_up,
-        "l" | "right" => extend_same_line_char_right,
+        "j" | "left" => extend_same_line_char_left,
+        "k" | "down" => extend_anchored_visual_line_down,
+        "l" | "up" => extend_anchored_visual_line_up,
+        ";" | "right" => extend_same_line_char_right,
 
         "a" => select_textobject_around,
         "i" => select_textobject_inner,
@@ -396,13 +400,13 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "esc" => exit_select_mode,
 
         "g" => { "Goto"
-            "k" => extend_anchored_line_up,
-            "j" => extend_anchored_line_down,
+            "l" => extend_anchored_line_up,
+            "k" => extend_anchored_line_down,
             "w" => extend_to_word,
         },
     }));
     let insert = keymap!({ "Insert mode"
-        "esc" => normal_mode,
+        "esc" | "C-c" => normal_mode,
 
         "C-s" => commit_undo_checkpoint,
         "C-x" => completion,
@@ -430,14 +434,14 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "end" => goto_line_end_newline,
     });
     let file_tree = keymap!({ "File tree"
-        "up" | "k" => file_tree_cursor_up,
-        "down" | "j" => file_tree_cursor_down,
+        "up" | "l" => file_tree_cursor_up,
+        "down" | "k" => file_tree_cursor_down,
         "pageup" | "C-u" => file_tree_page_up,
         "pagedown" | "C-d" => file_tree_page_down,
         "home" => file_tree_cursor_first,
         "end" => file_tree_cursor_last,
-        "left" | "h" => file_tree_collapse,
-        "right" | "l" => file_tree_expand,
+        "left" | "j" => file_tree_collapse,
+        "right" | ";" => file_tree_expand,
         "ret" => file_tree_open,
         "C-s" => file_tree_open_hsplit,
         "C-v" => file_tree_open_vsplit,
@@ -466,4 +470,92 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         Mode::Insert => insert,
         Mode::FileTree => file_tree,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::KeyTrie;
+    use helix_view::input::KeyEvent;
+
+    fn binding<'a>(keymaps: &'a HashMap<Mode, KeyTrie>, mode: Mode, keys: &[&str]) -> &'a KeyTrie {
+        let keys = keys
+            .iter()
+            .map(|key| key.parse::<KeyEvent>().unwrap())
+            .collect::<Vec<_>>();
+        keymaps[&mode].search(&keys).unwrap()
+    }
+
+    fn assert_command(keymaps: &HashMap<Mode, KeyTrie>, mode: Mode, keys: &[&str], name: &str) {
+        let KeyTrie::MappableCommand(command) = binding(keymaps, mode, keys) else {
+            panic!("{keys:?} is not a command");
+        };
+        assert_eq!(command.name(), name);
+    }
+
+    #[test]
+    fn uses_shifted_navigation_cluster() {
+        let keymaps = default_evil();
+
+        for (key, normal, select, file_tree) in [
+            (
+                "j",
+                "move_same_line_char_left",
+                "extend_same_line_char_left",
+                "file_tree_collapse",
+            ),
+            (
+                "k",
+                "move_anchored_visual_line_down",
+                "extend_anchored_visual_line_down",
+                "file_tree_cursor_down",
+            ),
+            (
+                "l",
+                "move_anchored_visual_line_up",
+                "extend_anchored_visual_line_up",
+                "file_tree_cursor_up",
+            ),
+            (
+                ";",
+                "move_same_line_char_right",
+                "extend_same_line_char_right",
+                "file_tree_expand",
+            ),
+        ] {
+            assert_command(&keymaps, Mode::Normal, &[key], normal);
+            assert_command(&keymaps, Mode::Select, &[key], select);
+            assert_command(&keymaps, Mode::FileTree, &[key], file_tree);
+        }
+    }
+
+    #[test]
+    fn includes_personal_default_bindings() {
+        let keymaps = default_evil();
+
+        for (key, command) in [
+            ("H", "goto_window_top"),
+            ("M", "goto_window_center"),
+            ("L", "goto_window_bottom"),
+            ("s", "change_selection"),
+        ] {
+            assert_command(&keymaps, Mode::Normal, &[key], command);
+        }
+        assert_command(&keymaps, Mode::Insert, &["C-c"], "normal_mode");
+
+        let KeyTrie::Sequence(commands) = binding(&keymaps, Mode::Normal, &["D"]) else {
+            panic!("D is not a command sequence");
+        };
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.name())
+                .collect::<Vec<_>>(),
+            [
+                "ensure_selections_forward",
+                "extend_to_line_end",
+                "delete_selection"
+            ]
+        );
+    }
 }
