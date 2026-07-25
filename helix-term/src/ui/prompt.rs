@@ -48,6 +48,7 @@ pub struct Prompt {
     next_char_handler: Option<PromptCharHandler>,
     language: Option<(&'static str, Arc<ArcSwap<syntax::Loader>>)>,
     context_menu_started_at: Instant,
+    context_menu_visible: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,6 +106,7 @@ impl Prompt {
             next_char_handler: None,
             language: None,
             context_menu_started_at: Instant::now(),
+            context_menu_visible: false,
         }
     }
 
@@ -159,12 +161,14 @@ impl Prompt {
     pub fn recalculate_completion(&mut self, editor: &Editor) {
         self.exit_selection();
         self.completion = (self.completion_fn)(editor, &self.line);
-        self.context_menu_started_at = Instant::now();
-        let timeout = editor.config().context_menu_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(timeout).await;
-            helix_event::request_redraw();
-        });
+        if !self.context_menu_visible {
+            self.context_menu_started_at = Instant::now();
+            let timeout = editor.config().context_menu_timeout;
+            tokio::spawn(async move {
+                tokio::time::sleep(timeout).await;
+                helix_event::request_redraw();
+            });
+        }
     }
 
     /// Compute the cursor position after applying movement
@@ -440,13 +444,14 @@ impl Prompt {
             area.width,
             height,
         );
-        let context_menu_visible = ui::context_menu_visible(
-            self.line.chars().count(),
+        self.context_menu_visible = ui::prompt_context_menu_visible(
+            self.context_menu_visible,
+            &self.line,
             self.context_menu_started_at.elapsed(),
             &cx.editor.config(),
         );
 
-        if context_menu_visible && completion_area.height > 0 && !self.completion.is_empty() {
+        if self.context_menu_visible && completion_area.height > 0 && !self.completion.is_empty() {
             let area = completion_area;
             let background = theme.get("ui.menu");
 
@@ -489,7 +494,7 @@ impl Prompt {
             }
         }
 
-        if context_menu_visible {
+        if self.context_menu_visible {
             if let Some(doc) = (self.doc_fn)(&self.line) {
                 let mut text = ui::Text::new(doc.to_string());
 

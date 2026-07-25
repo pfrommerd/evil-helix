@@ -9,7 +9,7 @@ use std::{
 use helix_core::Position;
 use helix_view::{
     editor::Action,
-    graphics::{CursorKind, Rect, Style},
+    graphics::{CursorKind, Modifier, Rect, Style},
     input::{Event, MouseButton, MouseEventKind},
     Editor,
 };
@@ -95,7 +95,8 @@ pub struct FileTree {
     root: PathBuf,
     rows: Vec<Row>,
     directory_entries: HashMap<PathBuf, Vec<Row>>,
-    expanded: HashSet<PathBuf>,
+    manual_expanded: HashSet<PathBuf>,
+    provisional_expanded: HashSet<PathBuf>,
     marked: HashSet<PathBuf>,
     cursor: usize,
     scroll: usize,
@@ -125,13 +126,14 @@ impl FileTree {
         let config = &editor.config().file_tree;
         let (min_width, max_width) = ordered_width_bounds(config.min_width, config.max_width);
         let root = helix_stdx::env::current_working_dir();
-        let mut expanded = HashSet::new();
-        expanded.insert(root.clone());
+        let mut manual_expanded = HashSet::new();
+        manual_expanded.insert(root.clone());
         let mut tree = Self {
             root,
             rows: Vec::new(),
             directory_entries: HashMap::new(),
-            expanded,
+            manual_expanded,
+            provisional_expanded: HashSet::new(),
             marked: HashSet::new(),
             cursor: 0,
             scroll: 0,
@@ -274,8 +276,9 @@ impl FileTree {
         let cwd = helix_stdx::env::current_working_dir();
         if cwd != self.root {
             self.root = cwd;
-            self.expanded.clear();
-            self.expanded.insert(self.root.clone());
+            self.manual_expanded.clear();
+            self.manual_expanded.insert(self.root.clone());
+            self.provisional_expanded.clear();
             self.directory_entries.clear();
             self.marked.clear();
             self.clipboard = None;
@@ -298,15 +301,24 @@ impl FileTree {
         }
 
         let selected = self.rows.get(self.cursor).map(|row| row.path.clone());
-        let mut directories: Vec<_> = self.expanded.iter().cloned().collect();
+        let mut directories: Vec<_> = self.effective_expansions().cloned().collect();
         directories.sort_by_key(|path| path.components().count());
         for directory in directories {
             if directory.is_dir() {
                 self.load_directory(&directory, editor);
             } else {
-                self.remove_expanded_subtree(&directory);
+                self.remove_expansion_subtree(&directory);
             }
         }
+        self.provisional_expanded = self.provisional_expansions(editor);
+        let mut directories: Vec<_> = self.effective_expansions().cloned().collect();
+        directories.sort_by_key(|path| path.components().count());
+        for directory in directories {
+            if !self.directory_entries.contains_key(&directory) {
+                self.load_directory(&directory, editor);
+            }
+        }
+        self.prune_directory_entries();
         self.rebuild_rows(editor);
         if self.search_initialized || self.search_focused || !self.search_prompt.line().is_empty() {
             self.start_search_scan(editor);
@@ -332,9 +344,9 @@ impl FileTree {
             self.rebuild_rows(editor);
             return;
         }
-        self.expanded.clear();
-        self.expanded.insert(self.root.clone());
-        self.directory_entries.retain(|path, _| path == &self.root);
+        self.manual_expanded.clear();
+        self.manual_expanded.insert(self.root.clone());
+        self.prune_directory_entries();
         self.rebuild_rows(editor);
         self.clamp_cursor();
     }
@@ -372,9 +384,10 @@ impl FileTree {
             if directory.is_dir() {
                 self.load_directory(&directory, editor);
             } else {
-                self.remove_expanded_subtree(&directory);
+                self.remove_expansion_subtree(&directory);
             }
         }
+        self.prune_directory_entries();
         self.rebuild_rows(editor);
         if self.search_initialized {
             self.start_search_scan(editor);
@@ -530,14 +543,14 @@ impl FileTree {
             row.depth = depth;
             row.expansion_root = entry.path.clone();
             if editor.config().file_tree.flatten_dirs && row.is_dir {
-                while self.expanded.contains(&row.path) {
+                while self.is_expanded(&row.path) {
                     let Some(children) = self.directory_entries.get(&row.path) else {
                         break;
                     };
                     let [child] = children.as_slice() else {
                         break;
                     };
-                    if !child.is_dir || !self.expanded.contains(&child.path) {
+                    if !child.is_dir || !self.is_expanded(&child.path) {
                         break;
                     }
                     row.name.push('/');
@@ -546,23 +559,59 @@ impl FileTree {
                 }
             }
             out.push(row.clone());
-            if row.is_dir && self.expanded.contains(&row.path) {
+            if row.is_dir && self.is_expanded(&row.path) {
                 self.collect_rows(&row.path, depth + 1, editor, out);
             }
         }
     }
 
-    fn remove_expanded_subtree(&mut self, root: &Path) {
-        self.expanded.retain(|path| !path.starts_with(root));
+    fn is_expanded(&self, path: &Path) -> bool {
+        self.manual_expanded.contains(path) || self.provisional_expanded.contains(path)
+    }
+
+    fn effective_expansions(&self) -> impl Iterator<Item = &PathBuf> {
+        self.manual_expanded
+            .iter()
+            .chain(self.provisional_expanded.iter())
+    }
+
+    fn remove_expansion_subtree(&mut self, root: &Path) {
+        self.manual_expanded.retain(|path| !path.starts_with(root));
+        self.provisional_expanded
+            .retain(|path| !path.starts_with(root));
         self.directory_entries
             .retain(|path, _| !path.starts_with(root));
     }
 
+    fn collapse_manual_subtree(&mut self, root: &Path) {
+        self.manual_expanded.retain(|path| !path.starts_with(root));
+        self.prune_directory_entries();
+    }
+
+    fn prune_directory_entries(&mut self) {
+        let expanded = self.effective_expansions().cloned().collect::<HashSet<_>>();
+        self.directory_entries
+            .retain(|path, _| expanded.contains(path));
+    }
+
     fn expand_directory(&mut self, path: PathBuf, editor: &Editor) {
         let flatten = editor.config().file_tree.flatten_dirs;
+        let mut ancestors = path
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(&self.root))
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        ancestors.reverse();
+        for ancestor in ancestors.iter().take(ancestors.len().saturating_sub(1)) {
+            self.manual_expanded.insert(ancestor.clone());
+            if !self.directory_entries.contains_key(ancestor) {
+                self.load_directory(ancestor, editor);
+            }
+        }
         let mut directory = path;
         loop {
-            if !self.expanded.insert(directory.clone()) {
+            let newly_expanded = self.manual_expanded.insert(directory.clone());
+            if !newly_expanded && self.directory_entries.contains_key(&directory) {
                 break;
             }
             self.load_directory(&directory, editor);
@@ -579,6 +628,42 @@ impl FileTree {
         }
         self.rebuild_rows(editor);
         self.clamp_cursor();
+    }
+
+    fn provisional_expansions(&self, editor: &Editor) -> HashSet<PathBuf> {
+        let mut expanded = HashSet::new();
+        for path in editor.documents().filter_map(|document| document.path()) {
+            let Some(ancestors) = self.visible_ancestors(path, editor) else {
+                continue;
+            };
+            expanded.extend(ancestors);
+        }
+        expanded
+    }
+
+    fn visible_ancestors(&self, path: &Path, editor: &Editor) -> Option<Vec<PathBuf>> {
+        if path == self.root || !path.starts_with(&self.root) {
+            return None;
+        }
+
+        let mut parent = self.root.clone();
+        let mut ancestors = vec![parent.clone()];
+        for component in path.strip_prefix(&self.root).ok()?.components() {
+            let child = parent.join(component);
+            let cached;
+            let entries = if let Some(entries) = self.directory_entries.get(&parent) {
+                entries
+            } else {
+                cached = read_directory(&parent, self.show_hidden, editor);
+                &cached
+            };
+            let entry = entries.iter().find(|entry| entry.path == child)?;
+            if entry.is_dir {
+                ancestors.push(child.clone());
+            }
+            parent = child;
+        }
+        Some(ancestors)
     }
 }
 
@@ -854,21 +939,7 @@ impl FileTree {
         if !path.starts_with(&self.root) {
             return;
         }
-        let mut ancestors = Vec::new();
-        let mut parent = path.parent();
-        while let Some(dir) = parent {
-            if !dir.starts_with(&self.root) {
-                break;
-            }
-            ancestors.push(dir.to_path_buf());
-            parent = dir.parent();
-        }
-        ancestors.reverse();
-        for directory in ancestors {
-            self.expanded.insert(directory.clone());
-            self.load_directory(&directory, editor);
-        }
-        self.rebuild_rows(editor);
+        self.refresh(editor);
         if let Some(index) = self.rows.iter().position(|row| row.path == path) {
             self.cursor = index;
             self.pending_center = true;
@@ -915,8 +986,8 @@ impl FileTree {
             self.rebuild_rows(editor);
             return;
         }
-        if self.expanded.contains(&row.expansion_root) {
-            self.remove_expanded_subtree(&row.expansion_root);
+        if self.is_expanded(&row.expansion_root) {
+            self.collapse_manual_subtree(&row.expansion_root);
             self.rebuild_rows(editor);
             self.clamp_cursor();
         } else {
@@ -947,8 +1018,8 @@ impl FileTree {
             }
             return;
         }
-        if row.is_dir && self.expanded.contains(&row.expansion_root) {
-            self.remove_expanded_subtree(&row.expansion_root);
+        if row.is_dir && self.is_expanded(&row.expansion_root) {
+            self.collapse_manual_subtree(&row.expansion_root);
             self.rebuild_rows(editor);
             self.clamp_cursor();
             return;
@@ -979,9 +1050,7 @@ impl FileTree {
             return;
         }
         if row.is_dir {
-            if !self.expanded.contains(&row.expansion_root) {
-                self.expand_directory(row.path, editor);
-            }
+            self.expand_directory(row.path, editor);
         }
     }
 
@@ -1355,6 +1424,7 @@ impl FileTree {
         self.last_area = Some(area);
         if self.dirty.swap(false, Ordering::Relaxed)
             || helix_stdx::env::current_working_dir() != self.root
+            || self.provisional_expanded != self.provisional_expansions(cx.editor)
         {
             self.refresh(cx.editor);
         }
@@ -1382,6 +1452,10 @@ impl FileTree {
             .document(editor.tree.get(editor.tree.focus).doc)
             .and_then(|doc| doc.path())
             .map(Path::to_path_buf);
+        let open_paths = editor
+            .documents()
+            .filter_map(|document| document.path().map(Path::to_path_buf))
+            .collect::<HashSet<_>>();
         let diagnostics = if editor.config().file_tree.diagnostics {
             aggregate_diagnostics(editor.workspace_diagnostic_counts(), &self.root)
         } else {
@@ -1403,7 +1477,7 @@ impl FileTree {
             };
             let disclosure = if row.is_dir {
                 let expanded = if self.search_prompt.line().is_empty() {
-                    self.expanded.contains(&row.path)
+                    self.is_expanded(&row.path)
                 } else {
                     self.search_directory_expanded(&row.path)
                 };
@@ -1420,7 +1494,9 @@ impl FileTree {
             let line = format!("{marker} {}{disclosure} {name}", "  ".repeat(row.depth));
             let mut style: Style = if row.is_dir { directory } else { text };
             if active_path.as_ref() == Some(&row.path) {
-                style = style.patch(editor.theme.get("ui.text.focus"));
+                style = style.add_modifier(Modifier::BOLD);
+            } else if open_paths.contains(&row.path) {
+                style = style.add_modifier(Modifier::ITALIC);
             }
             if index == self.cursor && self.focused && !self.search_focused {
                 style = style.patch(selected);
@@ -1536,7 +1612,8 @@ mod tests {
             root,
             rows: Vec::new(),
             directory_entries: HashMap::new(),
-            expanded: HashSet::new(),
+            manual_expanded: HashSet::new(),
+            provisional_expanded: HashSet::new(),
             marked: HashSet::new(),
             cursor: 0,
             scroll: 0,
@@ -1969,17 +2046,17 @@ mod tests {
         let nested = open.join("nested");
         let sibling = root.join("sibling");
         let mut tree = empty_tree(root.clone());
-        tree.expanded
+        tree.manual_expanded
             .extend([root.clone(), open.clone(), nested.clone(), sibling.clone()]);
         for directory in [&root, &open, &nested, &sibling] {
             tree.directory_entries
                 .insert(directory.to_path_buf(), Vec::new());
         }
 
-        tree.remove_expanded_subtree(&open);
+        tree.remove_expansion_subtree(&open);
 
         assert_eq!(
-            tree.expanded,
+            tree.manual_expanded,
             HashSet::from([root.clone(), sibling.clone()])
         );
         assert_eq!(
@@ -1988,6 +2065,74 @@ mod tests {
                 .collect::<HashSet<_>>(),
             HashSet::from([root, sibling])
         );
+    }
+
+    #[test]
+    fn provisional_expansions_are_effective_and_watched() {
+        let root = PathBuf::from("/workspace");
+        let src = root.join("src");
+        let nested = src.join("nested");
+        let mut tree = empty_tree(root.clone());
+        tree.manual_expanded.insert(root.clone());
+        tree.provisional_expanded
+            .extend([root.clone(), src.clone(), nested.clone()]);
+        for directory in [&root, &src, &nested] {
+            tree.directory_entries
+                .insert(directory.to_path_buf(), Vec::new());
+        }
+
+        assert!(tree.is_expanded(&src));
+        assert!(tree.is_expanded(&nested));
+        assert_eq!(
+            tree.watched_directories()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([root, src, nested])
+        );
+    }
+
+    #[test]
+    fn collapsing_provisional_directory_only_clears_manual_ownership() {
+        let root = PathBuf::from("/workspace");
+        let src = root.join("src");
+        let mut tree = empty_tree(root.clone());
+        tree.manual_expanded.extend([root.clone(), src.clone()]);
+        tree.provisional_expanded
+            .extend([root.clone(), src.clone()]);
+        tree.directory_entries.insert(root, Vec::new());
+        tree.directory_entries.insert(src.clone(), Vec::new());
+
+        tree.collapse_manual_subtree(&src);
+
+        assert!(!tree.manual_expanded.contains(&src));
+        assert!(tree.is_expanded(&src));
+        assert!(tree.directory_entries.contains_key(&src));
+    }
+
+    #[test]
+    fn provisional_cache_is_removed_after_the_last_dependency_closes() {
+        let root = PathBuf::from("/workspace");
+        let manual = root.join("manual");
+        let provisional = root.join("provisional");
+        let mut tree = empty_tree(root.clone());
+        tree.manual_expanded.extend([root.clone(), manual.clone()]);
+        tree.provisional_expanded
+            .extend([root.clone(), provisional.clone()]);
+        for directory in [&root, &manual, &provisional] {
+            tree.directory_entries
+                .insert(directory.to_path_buf(), Vec::new());
+        }
+
+        tree.provisional_expanded.clear();
+        tree.prune_directory_entries();
+
+        assert_eq!(
+            tree.watched_directories()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([root, manual])
+        );
+        assert!(!tree.is_expanded(&provisional));
     }
 
     #[test]

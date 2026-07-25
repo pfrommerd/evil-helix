@@ -47,6 +47,17 @@ pub(crate) fn context_menu_visible(
     typed_len > config.context_menu_trigger_len || elapsed >= config.context_menu_timeout
 }
 
+pub(crate) fn prompt_context_menu_visible(
+    was_visible: bool,
+    input: &str,
+    elapsed: Duration,
+    config: &helix_view::editor::Config,
+) -> bool {
+    was_visible
+        || input.chars().next_back().is_some_and(char::is_whitespace)
+        || context_menu_visible(input.chars().count(), elapsed, config)
+}
+
 struct Utf8PathBuf {
     path: String,
     is_dir: bool,
@@ -850,11 +861,40 @@ mod tests {
     fn context_menu_respects_character_and_time_thresholds() {
         let config = helix_view::editor::Config::default();
         assert!(!context_menu_visible(
-            1,
-            Duration::from_millis(4999),
+            2,
+            Duration::from_millis(2999),
             &config
         ));
-        assert!(context_menu_visible(2, Duration::ZERO, &config));
-        assert!(context_menu_visible(1, Duration::from_secs(5), &config));
+        assert!(context_menu_visible(3, Duration::ZERO, &config));
+        assert!(context_menu_visible(2, Duration::from_secs(3), &config));
+    }
+
+    #[test]
+    fn prompt_context_menu_stays_visible() {
+        let config = helix_view::editor::Config::default();
+        assert!(prompt_context_menu_visible(
+            false,
+            "waq",
+            Duration::ZERO,
+            &config
+        ));
+        assert!(prompt_context_menu_visible(
+            true,
+            "",
+            Duration::ZERO,
+            &config
+        ));
+        assert!(!prompt_context_menu_visible(
+            false,
+            "",
+            Duration::ZERO,
+            &config
+        ));
+        assert!(prompt_context_menu_visible(
+            false,
+            "w ",
+            Duration::ZERO,
+            &config
+        ));
     }
 }

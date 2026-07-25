@@ -444,10 +444,10 @@ pub struct Config {
     /// Whether to display infoboxes. Defaults to true.
     pub auto_info: bool,
     /// Show context and prompt-completion menus after more than this many characters.
-    /// Defaults to 1.
+    /// Defaults to 2.
     pub context_menu_trigger_len: usize,
     /// Show context and prompt-completion menus after this delay even if the character
-    /// threshold has not been exceeded. Defaults to 5000ms.
+    /// threshold has not been exceeded. Defaults to 3000ms.
     #[serde(
         serialize_with = "serialize_duration_millis",
         deserialize_with = "deserialize_duration_millis"
@@ -1349,8 +1349,8 @@ impl Default for Config {
             preview_completion_insert: true,
             completion_trigger_len: 2,
             auto_info: true,
-            context_menu_trigger_len: 1,
-            context_menu_timeout: Duration::from_secs(5),
+            context_menu_trigger_len: 2,
+            context_menu_timeout: Duration::from_secs(3),
             file_picker: FilePickerConfig::default(),
             file_explorer: FileExplorerConfig::default(),
             file_tree: FileTreeConfig::default(),

@@ -52,8 +52,8 @@
 | `completion-trigger-len` | The min-length of word under cursor to trigger autocompletion | `2` |
 | `completion-replace` | Whether to make completions always replace the entire word and not just the part before the cursor | `false` |
 | `auto-info` | Whether to display info boxes | `true` |
-| `context-menu-trigger-len` | Show key-context and prompt-completion menus after more than this many typed characters | `1` |
-| `context-menu-timeout` | Time in milliseconds before key-context and prompt-completion menus are shown regardless of typed length | `5000` |
+| `context-menu-trigger-len` | Show key-context and prompt-completion menus after more than this many typed characters; prompt completions also show immediately after trailing whitespace | `2` |
+| `context-menu-timeout` | Time in milliseconds before key-context and prompt-completion menus are shown regardless of typed length | `3000` |
 | `true-color` | Whether to override automatic detection of terminal truecolor support in the event of a false negative | `false` |
 | `undercurl` | Whether to override automatic detection of terminal undercurl support in the event of a false negative | `false` |
 | `rulers` | List of column positions at which to display the rulers. Can be overridden by language specific `rulers` in `languages.toml` file | `[]` |
@@ -261,6 +261,14 @@ The file tree is a persistent panel on the right side of the editor. It is separ
 file picker and modal file explorer. `Space-t` focuses or defocuses it, showing it first if
 needed. `Space-q` shows the tree if necessary and focuses its search field. `Space-T` toggles its
 visibility.
+
+Every open, path-backed buffer beneath the tree root is kept visible automatically, including
+buffers that are not currently displayed in a split. The tree provisionally expands the buffer's
+ancestor directories while respecting its hidden-file and ignore settings. These automatic
+expansions disappear when the last buffer that needs them closes; directories also expanded
+manually remain open. Collapsing a directory or all directories clears the manual expansion but
+cannot hide an ancestor that an open buffer still requires. The active buffer is shown in bold,
+while other open buffers are shown in italics.
 
 | Key | Description | Default |
 |--|--|---------|
