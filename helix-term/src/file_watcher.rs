@@ -18,11 +18,13 @@ pub struct FileWatcher {
     watcher: RecommendedWatcher,
     batches: mpsc::UnboundedReceiver<FileEventBatch>,
     watched: HashMap<PathBuf, RecursiveMode>,
-    root: PathBuf,
 }
 
 impl FileWatcher {
-    pub fn new(editor: &Editor) -> notify::Result<Self> {
+    pub fn new(
+        editor: &Editor,
+        tree_directories: impl IntoIterator<Item = PathBuf>,
+    ) -> notify::Result<Self> {
         let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<notify::Result<Event>>();
         let (batch_tx, batches) = mpsc::unbounded_channel();
         let timeout = Duration::from_millis(editor.config().file_watcher.debounce_timeout);
@@ -48,9 +50,8 @@ impl FileWatcher {
             watcher,
             batches,
             watched: HashMap::new(),
-            root: helix_stdx::env::current_working_dir(),
         };
-        this.reconcile(editor)?;
+        this.reconcile(editor, tree_directories)?;
         Ok(this)
     }
 
@@ -58,20 +59,15 @@ impl FileWatcher {
         self.batches.recv().await
     }
 
-    pub fn reconcile(&mut self, editor: &Editor) -> notify::Result<()> {
-        let root = helix_stdx::env::current_working_dir();
-        let mut desired = HashMap::from([(root.clone(), RecursiveMode::Recursive)]);
-        for document in editor.documents() {
-            let Some(path) = document.path() else {
-                continue;
-            };
-            if path.starts_with(&root) {
-                continue;
-            }
-            if let Some(parent) = path.parent() {
-                desired.insert(parent.to_path_buf(), RecursiveMode::NonRecursive);
-            }
-        }
+    pub fn reconcile(
+        &mut self,
+        editor: &Editor,
+        tree_directories: impl IntoIterator<Item = PathBuf>,
+    ) -> notify::Result<()> {
+        let open_files = editor
+            .documents()
+            .filter_map(|document| document.path().map(PathBuf::from));
+        let desired = desired_watches(open_files, tree_directories);
 
         let stale: Vec<_> = self
             .watched
@@ -90,9 +86,19 @@ impl FileWatcher {
             self.watcher.watch(&path, mode)?;
             self.watched.insert(path, mode);
         }
-        self.root = root;
         Ok(())
     }
+}
+
+fn desired_watches(
+    open_files: impl IntoIterator<Item = PathBuf>,
+    tree_directories: impl IntoIterator<Item = PathBuf>,
+) -> HashMap<PathBuf, RecursiveMode> {
+    open_files
+        .into_iter()
+        .chain(tree_directories)
+        .map(|path| (path, RecursiveMode::NonRecursive))
+        .collect()
 }
 
 fn collect_event(event: notify::Result<Event>, paths: &mut HashSet<PathBuf>, rescan: &mut bool) {
@@ -138,5 +144,28 @@ mod tests {
             &mut rescan,
         );
         assert!(rescan);
+    }
+
+    #[test]
+    fn desired_watches_are_bounded_to_open_files_and_loaded_directories() {
+        let root = PathBuf::from("/workspace");
+        let open = root.join("src/open.rs");
+        let expanded = root.join("expanded");
+        let desired = desired_watches([open.clone()], [root.clone(), expanded.clone()]);
+
+        assert_eq!(desired.len(), 3);
+        assert_eq!(desired[&open], RecursiveMode::NonRecursive);
+        assert_eq!(desired[&root], RecursiveMode::NonRecursive);
+        assert_eq!(desired[&expanded], RecursiveMode::NonRecursive);
+        assert!(!desired.contains_key(&root.join("collapsed")));
+        assert!(desired
+            .values()
+            .all(|mode| *mode == RecursiveMode::NonRecursive));
+    }
+
+    #[test]
+    fn desired_watches_can_be_empty() {
+        let desired = desired_watches(Vec::new(), Vec::new());
+        assert!(desired.is_empty());
     }
 }

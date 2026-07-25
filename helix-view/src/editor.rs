@@ -298,8 +298,6 @@ pub struct FileTreeConfig {
     pub flatten_dirs: bool,
     /// Reveal the current document when the tree gains focus.
     pub auto_reveal: bool,
-    /// Show version-control state.
-    pub git_status: bool,
     /// Show language-server diagnostics.
     pub diagnostics: bool,
 }
@@ -321,7 +319,6 @@ impl Default for FileTreeConfig {
             git_exclude: false,
             flatten_dirs: true,
             auto_reveal: true,
-            git_status: true,
             diagnostics: true,
         }
     }

@@ -3,21 +3,15 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{
-        atomic::AtomicBool,
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicBool, atomic::Ordering, Arc},
 };
 
-use helix_vcs::FileChange;
 use helix_view::{
     editor::Action,
     graphics::{Rect, Style},
     input::{Event, MouseButton, MouseEventKind},
     Editor,
 };
-use parking_lot::RwLock;
 use tui::buffer::Buffer as Surface;
 
 use crate::{
@@ -33,6 +27,7 @@ struct Row {
     name: String,
     depth: usize,
     is_dir: bool,
+    expansion_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,15 +40,6 @@ enum ClipboardKind {
 struct TreeClipboard {
     kind: ClipboardKind,
     paths: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitState {
-    Untracked,
-    Modified,
-    Renamed,
-    Deleted,
-    Conflict,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +75,7 @@ pub enum FileTreeAction {
 pub struct FileTree {
     root: PathBuf,
     rows: Vec<Row>,
+    directory_entries: HashMap<PathBuf, Vec<Row>>,
     expanded: HashSet<PathBuf>,
     marked: HashSet<PathBuf>,
     cursor: usize,
@@ -99,8 +86,6 @@ pub struct FileTree {
     show_hidden: bool,
     clipboard: Option<TreeClipboard>,
     last_height: usize,
-    git_status: Arc<RwLock<HashMap<PathBuf, GitState>>>,
-    git_generation: Arc<AtomicU64>,
     last_area: Option<Rect>,
     dirty: Arc<AtomicBool>,
 }
@@ -115,6 +100,7 @@ impl FileTree {
         let mut tree = Self {
             root,
             rows: Vec::new(),
+            directory_entries: HashMap::new(),
             expanded,
             marked: HashSet::new(),
             cursor: 0,
@@ -125,12 +111,12 @@ impl FileTree {
             show_hidden: !config.hidden,
             clipboard: None,
             last_height: 1,
-            git_status: Arc::new(RwLock::new(HashMap::new())),
-            git_generation: Arc::new(AtomicU64::new(0)),
             last_area: None,
             dirty: Arc::new(AtomicBool::new(false)),
         };
-        tree.refresh(editor);
+        if tree.visible {
+            tree.refresh(editor);
+        }
         tree
     }
 
@@ -138,8 +124,8 @@ impl FileTree {
         self.visible = !self.visible;
         if !self.visible {
             self.focused = false;
-            self.git_generation.fetch_add(1, Ordering::Relaxed);
-            self.git_status.write().clear();
+            self.rows.clear();
+            self.directory_entries.clear();
         } else {
             self.refresh(editor);
         }
@@ -206,16 +192,30 @@ impl FileTree {
             self.root = cwd;
             self.expanded.clear();
             self.expanded.insert(self.root.clone());
+            self.directory_entries.clear();
             self.marked.clear();
             self.clipboard = None;
             self.cursor = 0;
             self.scroll = 0;
         }
 
+        if !self.visible {
+            self.rows.clear();
+            self.directory_entries.clear();
+            return;
+        }
+
         let selected = self.rows.get(self.cursor).map(|row| row.path.clone());
-        let mut rows = Vec::new();
-        self.collect_rows(&self.root, 0, editor, &mut rows);
-        self.rows = rows;
+        let mut directories: Vec<_> = self.expanded.iter().cloned().collect();
+        directories.sort_by_key(|path| path.components().count());
+        for directory in directories {
+            if directory.is_dir() {
+                self.load_directory(&directory, editor);
+            } else {
+                self.remove_expanded_subtree(&directory);
+            }
+        }
+        self.rebuild_rows(editor);
         self.marked.retain(|path| path.exists());
         if let Some(selected) = selected {
             if let Some(index) = self.rows.iter().position(|row| row.path == selected) {
@@ -223,111 +223,184 @@ impl FileTree {
             }
         }
         self.clamp_cursor();
-        self.refresh_git(editor);
     }
 
     pub fn collapse_all(&mut self, editor: &Editor) {
         self.expanded.clear();
         self.expanded.insert(self.root.clone());
-        self.refresh(editor);
+        self.directory_entries.retain(|path, _| path == &self.root);
+        self.rebuild_rows(editor);
+        self.clamp_cursor();
+    }
+
+    pub fn watched_directories(&self) -> Vec<PathBuf> {
+        if !self.visible {
+            return Vec::new();
+        }
+        self.directory_entries.keys().cloned().collect()
+    }
+
+    pub fn handle_file_events(&mut self, paths: &HashSet<PathBuf>, rescan: bool, editor: &Editor) {
+        if !self.visible {
+            return;
+        }
+        if rescan {
+            self.refresh(editor);
+            return;
+        }
+
+        let affected: Vec<_> = self
+            .directory_entries
+            .keys()
+            .filter(|directory| {
+                paths.iter().any(|path| {
+                    path == *directory || path.parent().is_some_and(|parent| parent == *directory)
+                })
+            })
+            .cloned()
+            .collect();
+        if affected.is_empty() {
+            return;
+        }
+        for directory in affected {
+            if directory.is_dir() {
+                self.load_directory(&directory, editor);
+            } else {
+                self.remove_expanded_subtree(&directory);
+            }
+        }
+        self.rebuild_rows(editor);
+        self.clamp_cursor();
+    }
+
+    fn load_directory(&mut self, dir: &Path, editor: &Editor) {
+        self.directory_entries.insert(
+            dir.to_path_buf(),
+            read_directory(dir, self.show_hidden, editor),
+        );
+    }
+
+    fn rebuild_rows(&mut self, editor: &Editor) {
+        let mut rows = Vec::new();
+        self.collect_rows(&self.root, 0, editor, &mut rows);
+        self.rows = rows;
     }
 
     fn collect_rows(&self, dir: &Path, depth: usize, editor: &Editor, out: &mut Vec<Row>) {
-        let config = &editor.config().file_tree;
-        let mut builder = ignore::WalkBuilder::new(dir);
-        let mut entries: Vec<_> = builder
-            .max_depth(Some(1))
-            .hidden(!self.show_hidden)
-            .parents(config.parents)
-            .ignore(config.ignore)
-            .git_ignore(config.git_ignore)
-            .git_global(config.git_global)
-            .git_exclude(config.git_exclude)
-            .follow_links(config.follow_symlinks)
-            .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
-            .add_custom_ignore_filename(".helix/ignore")
-            .build()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path() != dir)
-            .collect();
-        entries.sort_by(|a, b| {
-            let a_dir = a.file_type().is_some_and(|ty| ty.is_dir());
-            let b_dir = b.file_type().is_some_and(|ty| ty.is_dir());
-            (
-                !a_dir,
-                a.file_name().to_string_lossy().to_lowercase(),
-                a.file_name(),
-            )
-                .cmp(&(
-                    !b_dir,
-                    b.file_name().to_string_lossy().to_lowercase(),
-                    b.file_name(),
-                ))
-        });
-
+        let Some(entries) = self.directory_entries.get(dir) else {
+            return;
+        };
         for entry in entries {
-            let mut path = entry.path().to_path_buf();
+            let mut row = entry.clone();
+            row.depth = depth;
+            row.expansion_root = entry.path.clone();
+            if editor.config().file_tree.flatten_dirs && row.is_dir {
+                while self.expanded.contains(&row.path) {
+                    let Some(children) = self.directory_entries.get(&row.path) else {
+                        break;
+                    };
+                    let [child] = children.as_slice() else {
+                        break;
+                    };
+                    if !child.is_dir || !self.expanded.contains(&child.path) {
+                        break;
+                    }
+                    row.name.push('/');
+                    row.name.push_str(&child.name);
+                    row.path = child.path.clone();
+                }
+            }
+            out.push(row.clone());
+            if row.is_dir && self.expanded.contains(&row.path) {
+                self.collect_rows(&row.path, depth + 1, editor, out);
+            }
+        }
+    }
+
+    fn remove_expanded_subtree(&mut self, root: &Path) {
+        self.expanded.retain(|path| !path.starts_with(root));
+        self.directory_entries
+            .retain(|path, _| !path.starts_with(root));
+    }
+
+    fn expand_directory(&mut self, path: PathBuf, editor: &Editor) {
+        let flatten = editor.config().file_tree.flatten_dirs;
+        let mut directory = path;
+        loop {
+            if !self.expanded.insert(directory.clone()) {
+                break;
+            }
+            self.load_directory(&directory, editor);
+            if !flatten {
+                break;
+            }
+            let Some([child]) = self.directory_entries.get(&directory).map(Vec::as_slice) else {
+                break;
+            };
+            if !child.is_dir {
+                break;
+            }
+            directory = child.path.clone();
+        }
+        self.rebuild_rows(editor);
+        self.clamp_cursor();
+    }
+}
+
+fn read_directory(dir: &Path, show_hidden: bool, editor: &Editor) -> Vec<Row> {
+    let config = &editor.config().file_tree;
+    let mut builder = ignore::WalkBuilder::new(dir);
+    let mut entries: Vec<_> = builder
+        .max_depth(Some(1))
+        .hidden(!show_hidden)
+        .parents(config.parents)
+        .ignore(config.ignore)
+        .git_ignore(config.git_ignore)
+        .git_global(config.git_global)
+        .git_exclude(config.git_exclude)
+        .follow_links(config.follow_symlinks)
+        .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
+        .add_custom_ignore_filename(".helix/ignore")
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path() != dir)
+        .collect();
+    entries.sort_by(|a, b| {
+        let a_dir = a.file_type().is_some_and(|ty| ty.is_dir());
+        let b_dir = b.file_type().is_some_and(|ty| ty.is_dir());
+        (
+            !a_dir,
+            a.file_name().to_string_lossy().to_lowercase(),
+            a.file_name(),
+        )
+            .cmp(&(
+                !b_dir,
+                b.file_name().to_string_lossy().to_lowercase(),
+                b.file_name(),
+            ))
+    });
+
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path().to_path_buf();
             let Some(file_type) = entry.file_type() else {
-                continue;
+                return None;
             };
             let is_dir = file_type.is_dir()
                 || (config.follow_symlinks && file_type.is_symlink() && path.is_dir());
-            let mut name = entry.file_name().to_string_lossy().into_owned();
-            if is_dir && config.flatten_dirs {
-                while let Some(child) = single_visible_directory(&path, self.show_hidden) {
-                    name.push('/');
-                    name.push_str(&child.file_name().unwrap_or_default().to_string_lossy());
-                    path = child;
-                }
-            }
-            out.push(Row {
-                path: path.clone(),
-                name,
-                depth,
+            Some(Row {
+                expansion_root: path.clone(),
+                path,
+                name: entry.file_name().to_string_lossy().into_owned(),
+                depth: 0,
                 is_dir,
-            });
-            if is_dir && self.expanded.contains(&path) {
-                self.collect_rows(&path, depth + 1, editor, out);
-            }
-        }
-    }
+            })
+        })
+        .collect()
+}
 
-    fn refresh_git(&mut self, editor: &Editor) {
-        if !self.visible || !editor.config().file_tree.git_status {
-            self.git_status.write().clear();
-            return;
-        }
-        let root = self.root.clone();
-        let trust_full = editor
-            .workspace_trust
-            .query(&root, helix_loader::workspace_trust::TrustQuery::Git)
-            .is_trusted();
-        let statuses = Arc::clone(&self.git_status);
-        let generations = Arc::clone(&self.git_generation);
-        let generation = generations.fetch_add(1, Ordering::Relaxed) + 1;
-        statuses.write().clear();
-        editor
-            .diff_providers
-            .clone()
-            .for_each_changed_file(root, trust_full, move |change| {
-                if generations.load(Ordering::Relaxed) != generation {
-                    return false;
-                }
-                if let Ok(change) = change {
-                    let (path, state) = match change {
-                        FileChange::Untracked { path } => (path, GitState::Untracked),
-                        FileChange::Modified { path } => (path, GitState::Modified),
-                        FileChange::Conflict { path } => (path, GitState::Conflict),
-                        FileChange::Deleted { path } => (path, GitState::Deleted),
-                        FileChange::Renamed { to_path, .. } => (to_path, GitState::Renamed),
-                    };
-                    statuses.write().insert(path, state);
-                    helix_event::request_redraw();
-                }
-                true
-            });
-    }
-
+impl FileTree {
     fn clamp_cursor(&mut self) {
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
         if self.cursor < self.scroll {
@@ -359,15 +432,21 @@ impl FileTree {
         if !path.starts_with(&self.root) {
             return;
         }
+        let mut ancestors = Vec::new();
         let mut parent = path.parent();
         while let Some(dir) = parent {
             if !dir.starts_with(&self.root) {
                 break;
             }
-            self.expanded.insert(dir.to_path_buf());
+            ancestors.push(dir.to_path_buf());
             parent = dir.parent();
         }
-        self.refresh(editor);
+        ancestors.reverse();
+        for directory in ancestors {
+            self.expanded.insert(directory.clone());
+            self.load_directory(&directory, editor);
+        }
+        self.rebuild_rows(editor);
         if let Some(index) = self.rows.iter().position(|row| row.path == path) {
             self.cursor = index;
             self.clamp_cursor();
@@ -392,24 +471,29 @@ impl FileTree {
     }
 
     fn toggle_expand(&mut self, editor: &Editor) {
-        let Some(row) = self.rows.get(self.cursor) else {
+        let Some(row) = self.rows.get(self.cursor).cloned() else {
             return;
         };
         if !row.is_dir {
             return;
         }
-        if !self.expanded.remove(&row.path) {
-            self.expanded.insert(row.path.clone());
+        if self.expanded.contains(&row.expansion_root) {
+            self.remove_expanded_subtree(&row.expansion_root);
+            self.rebuild_rows(editor);
+            self.clamp_cursor();
+        } else {
+            self.expand_directory(row.path, editor);
         }
-        self.refresh(editor);
     }
 
     fn collapse_or_parent(&mut self, editor: &mut Editor) {
         let Some(row) = self.rows.get(self.cursor).cloned() else {
             return;
         };
-        if row.is_dir && self.expanded.remove(&row.path) {
-            self.refresh(editor);
+        if row.is_dir && self.expanded.contains(&row.expansion_root) {
+            self.remove_expanded_subtree(&row.expansion_root);
+            self.rebuild_rows(editor);
+            self.clamp_cursor();
             return;
         }
         let Some(parent) = row.path.parent() else {
@@ -430,8 +514,9 @@ impl FileTree {
             return;
         };
         if row.is_dir {
-            self.expanded.insert(row.path);
-            self.refresh(editor);
+            if !self.expanded.contains(&row.expansion_root) {
+                self.expand_directory(row.path, editor);
+            }
         }
     }
 
@@ -786,7 +871,6 @@ impl FileTree {
             .document(editor.tree.get(editor.tree.focus).doc)
             .and_then(|doc| doc.path())
             .map(Path::to_path_buf);
-        let git_status = aggregate_git_status(&self.git_status.read(), &self.root);
         let diagnostics = if editor.config().file_tree.diagnostics {
             aggregate_diagnostics(editor.workspace_diagnostic_counts(), &self.root)
         } else {
@@ -816,10 +900,7 @@ impl FileTree {
                 " "
             };
             let name = &row.name;
-            let badge = metadata_badge(
-                git_status.get(&row.path).copied(),
-                diagnostics.get(&row.path).copied(),
-            );
+            let badge = metadata_badge(diagnostics.get(&row.path).copied());
             let line = format!("{marker} {}{disclosure} {name}", "  ".repeat(row.depth));
             let mut style: Style = if row.is_dir { directory } else { text };
             if active_path.as_ref() == Some(&row.path) {
@@ -844,12 +925,7 @@ impl FileTree {
                     } else if diagnostic.is_some_and(|counts| counts.1 > 0) {
                         editor.theme.get("warning")
                     } else {
-                        match git_status.get(&row.path) {
-                            Some(GitState::Untracked) => editor.theme.get("diff.plus"),
-                            Some(GitState::Deleted) => editor.theme.get("diff.minus"),
-                            Some(GitState::Conflict) => editor.theme.get("error"),
-                            _ => editor.theme.get("diff.delta"),
-                        }
+                        editor.theme.get("diff.delta")
                     };
                     surface.set_stringn(
                         area.right().saturating_sub(badge_width + 1),
@@ -893,52 +969,6 @@ fn ordered_width_bounds(a: u16, b: u16) -> (u16, u16) {
     (a.min(b), a.max(b))
 }
 
-fn single_visible_directory(path: &Path, show_hidden: bool) -> Option<PathBuf> {
-    let mut entries = fs::read_dir(path)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| show_hidden || !entry.file_name().to_string_lossy().starts_with('.'));
-    let entry = entries.next()?;
-    if entries.next().is_some() || !entry.file_type().ok()?.is_dir() {
-        return None;
-    }
-    Some(entry.path())
-}
-
-fn aggregate_git_status(
-    direct: &HashMap<PathBuf, GitState>,
-    root: &Path,
-) -> HashMap<PathBuf, GitState> {
-    let mut result = direct.clone();
-    for (path, state) in direct {
-        let mut parent = path.parent();
-        while let Some(path) = parent {
-            if !path.starts_with(root) {
-                break;
-            }
-            result
-                .entry(path.to_path_buf())
-                .and_modify(|current| {
-                    if git_priority(*state) > git_priority(*current) {
-                        *current = *state;
-                    }
-                })
-                .or_insert(*state);
-            parent = path.parent();
-        }
-    }
-    result
-}
-
-fn git_priority(state: GitState) -> u8 {
-    match state {
-        GitState::Untracked => 0,
-        GitState::Modified | GitState::Renamed => 1,
-        GitState::Deleted => 2,
-        GitState::Conflict => 3,
-    }
-}
-
 fn aggregate_diagnostics(
     direct: HashMap<PathBuf, (usize, usize)>,
     root: &Path,
@@ -959,18 +989,8 @@ fn aggregate_diagnostics(
     result
 }
 
-fn metadata_badge(git: Option<GitState>, diagnostics: Option<(usize, usize)>) -> String {
+fn metadata_badge(diagnostics: Option<(usize, usize)>) -> String {
     let mut badge = String::new();
-    if let Some(state) = git {
-        badge.push(' ');
-        badge.push(match state {
-            GitState::Untracked => '?',
-            GitState::Modified => 'M',
-            GitState::Renamed => 'R',
-            GitState::Deleted => 'D',
-            GitState::Conflict => '!',
-        });
-    }
     if let Some((errors, warnings)) = diagnostics {
         if errors > 0 {
             badge.push_str(&format!(" E{errors}"));
@@ -985,6 +1005,26 @@ fn metadata_badge(git: Option<GitState>, diagnostics: Option<(usize, usize)>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_tree(root: PathBuf) -> FileTree {
+        FileTree {
+            root,
+            rows: Vec::new(),
+            directory_entries: HashMap::new(),
+            expanded: HashSet::new(),
+            marked: HashSet::new(),
+            cursor: 0,
+            scroll: 0,
+            visible: true,
+            focused: false,
+            width: 32,
+            show_hidden: true,
+            clipboard: None,
+            last_height: 1,
+            last_area: None,
+            dirty: Arc::new(AtomicBool::new(false)),
+        }
+    }
 
     #[test]
     fn marked_paths_drop_descendants() {
@@ -1006,17 +1046,48 @@ mod tests {
     #[test]
     fn metadata_is_aggregated_to_ancestors() {
         let root = PathBuf::from("/workspace");
-        let direct = HashMap::from([
-            (root.join("src/lib.rs"), GitState::Modified),
-            (root.join("src/main.rs"), GitState::Conflict),
-        ]);
-        let aggregated = aggregate_git_status(&direct, &root);
-        assert_eq!(aggregated[&root.join("src")], GitState::Conflict);
-
         let diagnostics =
             aggregate_diagnostics(HashMap::from([(root.join("src/lib.rs"), (2, 1))]), &root);
         assert_eq!(diagnostics[&root.join("src")], (2, 1));
         assert_eq!(diagnostics[&root], (2, 1));
+    }
+
+    #[test]
+    fn collapsing_evicts_only_the_selected_subtree() {
+        let root = PathBuf::from("/workspace");
+        let open = root.join("open");
+        let nested = open.join("nested");
+        let sibling = root.join("sibling");
+        let mut tree = empty_tree(root.clone());
+        tree.expanded
+            .extend([root.clone(), open.clone(), nested.clone(), sibling.clone()]);
+        for directory in [&root, &open, &nested, &sibling] {
+            tree.directory_entries
+                .insert(directory.to_path_buf(), Vec::new());
+        }
+
+        tree.remove_expanded_subtree(&open);
+
+        assert_eq!(
+            tree.expanded,
+            HashSet::from([root.clone(), sibling.clone()])
+        );
+        assert_eq!(
+            tree.watched_directories()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([root, sibling])
+        );
+    }
+
+    #[test]
+    fn hidden_tree_exposes_no_directory_watches() {
+        let root = PathBuf::from("/workspace");
+        let mut tree = empty_tree(root.clone());
+        tree.directory_entries.insert(root, Vec::new());
+        tree.visible = false;
+
+        assert!(tree.watched_directories().is_empty());
     }
 
     #[test]

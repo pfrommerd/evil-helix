@@ -95,6 +95,19 @@ impl EditorView {
         self.file_tree.refresh(editor);
     }
 
+    pub fn handle_file_tree_events(
+        &mut self,
+        paths: &std::collections::HashSet<PathBuf>,
+        rescan: bool,
+        editor: &Editor,
+    ) {
+        self.file_tree.handle_file_events(paths, rescan, editor);
+    }
+
+    pub fn file_tree_watched_directories(&self) -> Vec<PathBuf> {
+        self.file_tree.watched_directories()
+    }
+
     pub fn collapse_file_tree(&mut self, editor: &Editor) {
         self.file_tree.collapse_all(editor);
     }

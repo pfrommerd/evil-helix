@@ -251,7 +251,11 @@ impl Application {
 
         #[cfg(not(feature = "integration"))]
         let file_watcher = if editor.config().file_watcher.enable {
-            match FileWatcher::new(&editor) {
+            let tree_directories = compositor
+                .find::<ui::EditorView>()
+                .map(|view| view.file_tree_watched_directories())
+                .unwrap_or_default();
+            match FileWatcher::new(&editor, tree_directories) {
                 Ok(watcher) => Some(watcher),
                 Err(err) => {
                     editor.set_warning(format!("Could not start filesystem watcher: {err}"));
@@ -407,8 +411,13 @@ impl Application {
                 self.handle_file_events(FileEventBatch { paths, rescan });
                 self.render().await;
             }
+            let tree_directories = self
+                .compositor
+                .find::<ui::EditorView>()
+                .map(|view| view.file_tree_watched_directories())
+                .unwrap_or_default();
             if let Some(watcher) = self.file_watcher.as_mut() {
-                if let Err(err) = watcher.reconcile(&self.editor) {
+                if let Err(err) = watcher.reconcile(&self.editor, tree_directories) {
                     self.editor
                         .set_warning(format!("Could not update filesystem watches: {err}"));
                 }
@@ -431,7 +440,7 @@ impl Application {
         }
 
         if let Some(editor_view) = self.compositor.find::<ui::EditorView>() {
-            editor_view.refresh_file_tree(&self.editor);
+            editor_view.handle_file_tree_events(&batch.paths, batch.rescan, &self.editor);
         }
         self.editor.needs_redraw = true;
 
@@ -600,7 +609,12 @@ impl Application {
         }
         if !cfg!(feature = "integration") && self.editor.config().file_watcher.enable {
             if self.file_watcher.is_none() {
-                match FileWatcher::new(&self.editor) {
+                let tree_directories = self
+                    .compositor
+                    .find::<ui::EditorView>()
+                    .map(|view| view.file_tree_watched_directories())
+                    .unwrap_or_default();
+                match FileWatcher::new(&self.editor, tree_directories) {
                     Ok(watcher) => self.file_watcher = Some(watcher),
                     Err(err) => self
                         .editor

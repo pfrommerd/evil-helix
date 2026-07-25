@@ -277,7 +277,6 @@ needed. `Space-T` toggles its visibility.
 | `git-exclude` | Read `.git/info/exclude` | `false` |
 | `flatten-dirs` | Fold chains of single-child directories into one row | `true` |
 | `auto-reveal` | Reveal the active document when the tree gains focus | `true` |
-| `git-status` | Show and propagate version-control state | `true` |
 | `diagnostics` | Show and propagate error and warning counts | `true` |
 
 While focused, use `hjkl` or the arrow keys to move the tree selection without opening files.
@@ -299,7 +298,9 @@ m = "file_tree_mark"
 ### `[editor.file-watcher]` Section
 
 Helix uses native filesystem notifications to keep the tree current and reload unmodified open
-buffers after external changes. Modified buffers are never overwritten automatically.
+buffers after external changes. It watches only open files and directories expanded in the visible
+file tree; collapsed directories and hidden trees do not consume watches. Modified buffers are
+never overwritten automatically.
 
 | Key | Description | Default |
 |--|--|---------|
