@@ -259,7 +259,8 @@ Note that the ignore files consulted by the file explorer when `ignore` is set t
 
 The file tree is a persistent panel on the right side of the editor. It is separate from the
 file picker and modal file explorer. `Space-t` focuses or defocuses it, showing it first if
-needed. `Space-T` toggles its visibility.
+needed. `Space-q` shows the tree if necessary and focuses its search field. `Space-T` toggles its
+visibility.
 
 | Key | Description | Default |
 |--|--|---------|
@@ -268,7 +269,7 @@ needed. `Space-T` toggles its visibility.
 | `min-width` | Minimum width used by resize commands | `20` |
 | `max-width` | Maximum width used by resize commands | `80` |
 | `width-step` | Columns added or removed by each resize command | `4` |
-| `hidden` | Ignore hidden files | `false` |
+| `hidden` | Ignore hidden files | `true` |
 | `follow-symlinks` | Follow symlinked directories while browsing | `false` |
 | `ignore` | Read `.ignore` files | `false` |
 | `parents` | Read ignore files from parent directories | `false` |
@@ -284,7 +285,9 @@ While focused, use `hjkl` or the arrow keys to move the tree selection without o
 vertical split, and `Escape` returns focus to the editor. `w` marks entries. File operations
 are `y` (copy), `x` (cut), `p` (paste), `a`/`A` (new
 file/directory), `r` (rename), and `d` (permanent delete with confirmation). `R` refreshes, `z`
-collapses all directories, `.` toggles hidden files, and `+`/`-` resize the panel.
+collapses all directories, `.` toggles hidden files, and `+`/`-` resize the panel. `:` temporarily
+opens the command line without changing tree focus, including while the top-line tree search is
+focused.
 
 All focused-tree bindings use the standard `[keys.file-tree]` keymap and can be overridden like
 other modes:

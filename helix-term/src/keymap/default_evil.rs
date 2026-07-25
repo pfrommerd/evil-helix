@@ -11,9 +11,9 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "l" | "up" => move_anchored_visual_line_up,
         ";" | "right" => move_same_line_char_right,
 
-        "t" => evil_find_till_char,
+        "t" => file_tree_focus,
         "f" => evil_find_next_char,
-        "T" => evil_till_prev_char,
+        "T" => file_tree_toggle,
         "F" => evil_find_prev_char,
         "r" => replace,
         "R" => replace_with_yanked,
@@ -238,6 +238,7 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
             "E" => file_explorer_in_current_buffer_directory,
             "t" => file_tree_focus,
             "T" => file_tree_toggle,
+            "q" => file_tree_search,
             "b" => buffer_picker,
             "j" => jumplist_picker,
             "s" => symbol_picker,
@@ -394,6 +395,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         //"f" => extend_next_char,
         //"T" => extend_till_prev_char,
         //"F" => extend_prev_char,
+        "t" => evil_find_till_char,
+        "T" => evil_till_prev_char,
 
         "home" => extend_to_line_start,
         "end" => extend_to_line_end,
@@ -434,6 +437,7 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "end" => goto_line_end_newline,
     });
     let file_tree = keymap!({ "File tree"
+        ":" => command_mode,
         "up" | "l" => file_tree_cursor_up,
         "down" | "k" => file_tree_cursor_down,
         "pageup" | "C-u" => file_tree_page_up,
@@ -441,6 +445,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "H" => file_tree_cursor_top,
         "M" => file_tree_cursor_middle,
         "L" => file_tree_cursor_bottom,
+        "g" => file_tree_cursor_first,
+        "G" => file_tree_cursor_last,
         "home" => file_tree_cursor_first,
         "end" => file_tree_cursor_last,
         "left" | "j" => file_tree_collapse,
@@ -462,7 +468,11 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "+" => file_tree_width_increase,
         "-" => file_tree_width_decrease,
         "esc" => file_tree_focus_editor,
+        "q" => file_tree_search,
+        "t" => file_tree_focus,
+        "T" => file_tree_toggle,
         "space" => { "Space"
+            "q" => file_tree_search,
             "t" => file_tree_focus,
             "T" => file_tree_toggle,
         },
@@ -536,21 +546,40 @@ mod tests {
     fn includes_personal_default_bindings() {
         let keymaps = default_evil();
 
+        for mode in [Mode::Normal, Mode::Select] {
+            assert_command(&keymaps, mode, &["space", "q"], "file_tree_search");
+        }
         for (key, command) in [
             ("H", "goto_window_top"),
             ("M", "goto_window_center"),
             ("L", "goto_window_bottom"),
             ("s", "change_selection"),
+            ("t", "file_tree_focus"),
+            ("T", "file_tree_toggle"),
         ] {
             assert_command(&keymaps, Mode::Normal, &[key], command);
         }
+        assert_command(&keymaps, Mode::Select, &["t"], "evil_find_till_char");
+        assert_command(&keymaps, Mode::Select, &["T"], "evil_till_prev_char");
         for (key, command) in [
+            (":", "command_mode"),
             ("H", "file_tree_cursor_top"),
             ("M", "file_tree_cursor_middle"),
             ("L", "file_tree_cursor_bottom"),
+            ("g", "file_tree_cursor_first"),
+            ("G", "file_tree_cursor_last"),
+            ("q", "file_tree_search"),
+            ("t", "file_tree_focus"),
+            ("T", "file_tree_toggle"),
         ] {
             assert_command(&keymaps, Mode::FileTree, &[key], command);
         }
+        assert_command(
+            &keymaps,
+            Mode::FileTree,
+            &["space", "q"],
+            "file_tree_search",
+        );
         assert_command(&keymaps, Mode::Insert, &["C-c"], "normal_mode");
 
         let KeyTrie::Sequence(commands) = binding(&keymaps, Mode::Normal, &["D"]) else {

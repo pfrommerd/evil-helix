@@ -61,6 +61,7 @@ pub fn static_commands() -> Result<String, DynError> {
         ("normal", keymap[&Mode::Normal].reverse_map()),
         ("select", keymap[&Mode::Select].reverse_map()),
         ("insert", keymap[&Mode::Insert].reverse_map()),
+        ("file-tree", keymap[&Mode::FileTree].reverse_map()),
     ];
 
     md.push_str(&md_table_heading(&[

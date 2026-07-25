@@ -55,11 +55,11 @@
 | `extend_prev_sub_word_end` | Extend to end of prev sub word |  |
 | `extend_parent_node_end` | Extend to end of the parent node | select: `` <A-e> `` |
 | `extend_parent_node_start` | Extend to beginning of the parent node | select: `` <A-b> `` |
-| `find_till_char` | Move till next occurrence of char | normal: `` t `` |
+| `find_till_char` | Move till next occurrence of char |  |
 | `find_next_char` | Move to next occurrence of char | normal: `` f `` |
 | `extend_till_char` | Extend till next occurrence of char | select: `` t `` |
 | `extend_next_char` | Extend to next occurrence of char | select: `` f `` |
-| `till_prev_char` | Move till previous occurrence of char | normal: `` T `` |
+| `till_prev_char` | Move till previous occurrence of char |  |
 | `find_prev_char` | Move to previous occurrence of char | normal: `` F `` |
 | `extend_till_prev_char` | Extend till previous occurrence of char | select: `` T `` |
 | `extend_prev_char` | Extend to previous occurrence of char | select: `` F `` |
@@ -109,31 +109,35 @@
 | `insert_mode` | Insert before selection | normal: `` i ``, select: `` i `` |
 | `append_mode` | Append after selection | normal: `` a ``, select: `` a `` |
 | `append_mode_same_line` | Append after selection within the same line only |  |
-| `command_mode` | Enter command mode | normal: `` : ``, select: `` : `` |
+| `command_mode` | Enter command mode | normal: `` : ``, select: `` : ``, file-tree: `` : `` |
 | `file_picker` | Open file picker | normal: `` <space>f ``, select: `` <space>f `` |
 | `file_picker_in_current_buffer_directory` | Open file picker at current buffer's directory |  |
 | `file_picker_in_current_directory` | Open file picker at current working directory | normal: `` <space>F ``, select: `` <space>F `` |
 | `file_explorer` | Open file explorer in workspace root | normal: `` <space>e ``, select: `` <space>e `` |
 | `file_explorer_in_current_buffer_directory` | Open file explorer at current buffer's directory | normal: `` <space>. ``, select: `` <space>. `` |
 | `file_explorer_in_current_directory` | Open file explorer at current working directory |  |
-| `file_tree_toggle` | Toggle persistent file-tree visibility | normal: `` <space>T ``, select: `` <space>T ``, file-tree: `` <space>T `` |
-| `file_tree_focus` | Focus or defocus the persistent file tree | normal: `` <space>t ``, select: `` <space>t ``, file-tree: `` <space>t `` |
-| `file_tree_focus_editor` | Return focus from the file tree to the editor | file-tree: `` esc `` |
+| `file_tree_toggle` | Toggle persistent file-tree visibility | normal: `` T ``, `` <space>T ``, select: `` <space>T ``, file-tree: `` T ``, `` <space>T `` |
+| `file_tree_focus` | Focus or defocus the persistent file tree | normal: `` t ``, `` <space>t ``, select: `` <space>t ``, file-tree: `` t ``, `` <space>t `` |
+| `file_tree_focus_editor` | Return focus from the file tree to the editor | file-tree: `` <esc> `` |
+| `file_tree_search` | Focus or defocus the persistent file-tree search | normal: `` <space>q ``, select: `` <space>q ``, file-tree: `` q ``, `` <space>q `` |
 | `file_tree_refresh` | Refresh the persistent file tree | file-tree: `` R `` |
 | `file_tree_collapse_all` | Collapse all directories in the persistent file tree | file-tree: `` z `` |
 | `file_tree_width_increase` | Increase the persistent file tree width | file-tree: `` + `` |
-| `file_tree_width_decrease` | Decrease the persistent file tree width | file-tree: `` - `` |
-| `file_tree_cursor_up` | Move the file-tree cursor up | file-tree: `` k ``, `` up `` |
-| `file_tree_cursor_down` | Move the file-tree cursor down | file-tree: `` j ``, `` down `` |
-| `file_tree_page_up` | Move the file-tree cursor up half a page | file-tree: `` C-u ``, `` pageup `` |
-| `file_tree_page_down` | Move the file-tree cursor down half a page | file-tree: `` C-d ``, `` pagedown `` |
-| `file_tree_cursor_first` | Move to the first file-tree entry | file-tree: `` home `` |
-| `file_tree_cursor_last` | Move to the last file-tree entry | file-tree: `` end `` |
-| `file_tree_collapse` | Collapse a directory or select its parent | file-tree: `` h ``, `` left `` |
-| `file_tree_expand` | Expand the selected directory | file-tree: `` l ``, `` right `` |
-| `file_tree_open` | Open the selected file | file-tree: `` ret `` |
-| `file_tree_open_hsplit` | Open the selected file in a horizontal split | file-tree: `` C-s `` |
-| `file_tree_open_vsplit` | Open the selected file in a vertical split | file-tree: `` C-v `` |
+| `file_tree_width_decrease` | Decrease the persistent file tree width | file-tree: `` <minus> `` |
+| `file_tree_cursor_up` | Move the file-tree cursor up | file-tree: `` k ``, `` <up> `` |
+| `file_tree_cursor_down` | Move the file-tree cursor down | file-tree: `` j ``, `` <down> `` |
+| `file_tree_page_up` | Move the file-tree cursor up half a page | file-tree: `` <C-u> ``, `` <pageup> `` |
+| `file_tree_page_down` | Move the file-tree cursor down half a page | file-tree: `` <C-d> ``, `` <pagedown> `` |
+| `file_tree_cursor_top` | Move to the top visible file-tree entry |  |
+| `file_tree_cursor_middle` | Move to the middle visible file-tree entry |  |
+| `file_tree_cursor_bottom` | Move to the bottom visible file-tree entry |  |
+| `file_tree_cursor_first` | Move to the first file-tree entry | file-tree: `` g ``, `` <home> `` |
+| `file_tree_cursor_last` | Move to the last file-tree entry | file-tree: `` G ``, `` <end> `` |
+| `file_tree_collapse` | Collapse a directory or select its parent | file-tree: `` h ``, `` <left> `` |
+| `file_tree_expand` | Expand the selected directory | file-tree: `` l ``, `` <right> `` |
+| `file_tree_open` | Open the selected file | file-tree: `` <ret> `` |
+| `file_tree_open_hsplit` | Open the selected file in a horizontal split | file-tree: `` <C-s> `` |
+| `file_tree_open_vsplit` | Open the selected file in a vertical split | file-tree: `` <C-v> `` |
 | `file_tree_mark` | Mark or unmark the selected file-tree entry | file-tree: `` w `` |
 | `file_tree_copy` | Copy marked file-tree entries | file-tree: `` y `` |
 | `file_tree_cut` | Cut marked file-tree entries | file-tree: `` x `` |
@@ -346,6 +350,29 @@
 | `decrement` | Decrement item under cursor | normal: `` <C-x> ``, select: `` <C-x> `` |
 | `record_macro` | Record macro | normal: `` Q ``, select: `` Q `` |
 | `replay_macro` | Replay macro | normal: `` q ``, select: `` q `` |
+| `evil_prev_word_start` | Previous word start (evil) |  |
+| `evil_next_word_start` | Next word start (evil) |  |
+| `evil_next_word_end` | Next word end (evil) |  |
+| `evil_prev_long_word_start` | Previous long word start (evil) |  |
+| `evil_next_long_word_start` | Next long word start (evil) |  |
+| `evil_next_long_word_end` | Next long word end (evil) |  |
+| `evil_move_paragraph_forward` | Move forward by a paragraph (evil) |  |
+| `evil_move_paragraph_backward` | Move backward by a paragraph (evil) |  |
+| `evil_delete` | Delete (evil) |  |
+| `evil_delete_immediate` | Delete immediately (evil) |  |
+| `evil_yank` | Yank (evil) |  |
+| `evil_change` | Change (evil) |  |
+| `evil_find_till_char` | Move till next occurrence of char (evil) |  |
+| `evil_find_next_char` | Move to next occurrence of char (evil) |  |
+| `evil_till_prev_char` | Move till previous occurrence of char (evil) |  |
+| `evil_find_prev_char` | Move to previous occurrence of char (evil) |  |
+| `evil_append_mode` | Append after character |  |
+| `evil_cursor_forward_search` | Search forward for the word near cursor (evil) |  |
+| `evil_cursor_backward_search` | Search backward for the word near cursor (evil) |  |
+| `evil_goto_line_or_first_line` | Goto first line (evil) |  |
+| `evil_goto_line_or_last_line` | Goto last line (evil) |  |
+| `evil_characterwise_select_mode` | Enter/exit characterwise select mode |  |
+| `evil_linewise_select_mode` | Enter/exit linewise select mode |  |
 | `command_palette` | Open command palette | normal: `` <space>? ``, select: `` <space>? `` |
 | `goto_word` | Jump to a two-character label | normal: `` gw `` |
 | `extend_to_word` | Extend to a two-character label | select: `` gw `` |

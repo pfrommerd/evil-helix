@@ -33,7 +33,7 @@ Normal mode is the default mode when you launch helix. You can return to it from
 
 ### Movement
 
-> NOTE: Unlike Vim, `f`, `F`, `t` and `T` are not confined to the current line.
+> NOTE: Unlike Vim, `f` and `F` are not confined to the current line.
 
 > Hereafter, `<n>` represents an integer by typing a sequence of digits.
 
@@ -49,9 +49,9 @@ Normal mode is the default mode when you launch helix. You can return to it from
 | `W`                   | Move next WORD start                               | `move_next_long_word_start` |
 | `B`                   | Move previous WORD start                           | `move_prev_long_word_start` |
 | `E`                   | Move next WORD end                                 | `move_next_long_word_end`   |
-| `t`                   | Find till next char                                | `find_till_char`            |
+| `t`                   | Focus or show the persistent file tree             | `file_tree_focus`           |
 | `f`                   | Find next char                                     | `find_next_char`            |
-| `T`                   | Find till previous char                            | `till_prev_char`            |
+| `T`                   | Toggle persistent file-tree visibility             | `file_tree_toggle`          |
 | `F`                   | Find previous char                                 | `find_prev_char`            |
 | `<n>G`, `<n>gg`       | Go to line number `<n>`                            | `goto_line`                 |
 | `Alt-.`               | Repeat last motion (`f`, `t`, `m`, `[` or `]`)     | `repeat_last_motion`        |
@@ -299,6 +299,7 @@ This layer is a kludge of mappings, mostly pickers.
 | `.`     | Open file explorer at current buffer's directory                        | `file_explorer_in_current_buffer_directory`|
 | `t`     | Focus or defocus the persistent file tree                               | `file_tree_focus`                          |
 | `T`     | Toggle persistent file-tree visibility                                  | `file_tree_toggle`                         |
+| `q`     | Open and focus the persistent file-tree search                          | `file_tree_search`                         |
 | `b`     | Open buffer picker                                                      | `buffer_picker`                            |
 | `j`     | Open jumplist picker                                                    | `jumplist_picker`                          |
 | `g`     | Open changed file picker                                                | `changed_file_picker`                      |
@@ -331,6 +332,7 @@ and can be overridden under `[keys.file-tree]`.
 
 | Key | Description | Command |
 | --- | --- | --- |
+| `:` | Temporarily open the command line | `command_mode` |
 | `j`, `Down` | Move down | `file_tree_cursor_down` |
 | `k`, `Up` | Move up | `file_tree_cursor_up` |
 | `Ctrl-d`, `PageDown` | Move down half a page | `file_tree_page_down` |
@@ -509,6 +511,7 @@ See the documentation page on [pickers](./pickers.md) for more info.
 | `Ctrl-s`                     | Open horizontally                                          |
 | `Ctrl-v`                     | Open vertically                                            |
 | `Ctrl-t`                     | Toggle preview                                             |
+| `:`                          | Temporarily open the command line                          |
 | `Escape`, `Ctrl-c`           | Close picker                                               |
 
 ## Prompt

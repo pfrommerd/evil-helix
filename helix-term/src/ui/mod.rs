@@ -227,33 +227,37 @@ pub struct FilePickerData {
 }
 type FilePicker = Picker<PathBuf, FilePickerData>;
 
-pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
+pub(crate) fn file_picker_paths(
+    editor: &Editor,
+    root: PathBuf,
+) -> impl Iterator<Item = PathBuf> + Send + 'static {
+    file_picker_paths_with_hidden(editor, root, None)
+}
+
+pub(crate) fn file_picker_paths_with_hidden(
+    editor: &Editor,
+    root: PathBuf,
+    hidden: Option<bool>,
+) -> impl Iterator<Item = PathBuf> + Send + 'static {
     use ignore::WalkBuilder;
-    use std::time::Instant;
 
-    let config = editor.config();
-    let data = FilePickerData {
-        root: root.clone(),
-        directory_style: editor.theme.get("ui.text.directory"),
-    };
-
-    let now = Instant::now();
-
-    let dedup_symlinks = config.file_picker.deduplicate_links;
+    let mut config = editor.config().file_picker.clone();
+    if let Some(hidden) = hidden {
+        config.hidden = hidden;
+    }
+    let dedup_symlinks = config.deduplicate_links;
     let absolute_root = root.canonicalize().unwrap_or_else(|_| root.clone());
-
     let mut walk_builder = WalkBuilder::new(&root);
-
-    let mut files = walk_builder
-        .hidden(config.file_picker.hidden)
-        .parents(config.file_picker.parents)
-        .ignore(config.file_picker.ignore)
-        .follow_links(config.file_picker.follow_symlinks)
-        .git_ignore(config.file_picker.git_ignore)
-        .git_global(config.file_picker.git_global)
-        .git_exclude(config.file_picker.git_exclude)
+    walk_builder
+        .hidden(config.hidden)
+        .parents(config.parents)
+        .ignore(config.ignore)
+        .follow_links(config.follow_symlinks)
+        .git_ignore(config.git_ignore)
+        .git_global(config.git_global)
+        .git_exclude(config.git_exclude)
         .sort_by_file_name(|name1, name2| name1.cmp(name2))
-        .max_depth(config.file_picker.max_depth)
+        .max_depth(config.max_depth)
         .filter_entry(move |entry| filter_picker_entry(entry, &absolute_root, dedup_symlinks))
         .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
         .add_custom_ignore_filename(".helix/ignore")
@@ -265,7 +269,18 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
                 return None;
             }
             Some(entry.into_path())
-        });
+        })
+}
+
+pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
+    use std::time::Instant;
+
+    let data = FilePickerData {
+        root: root.clone(),
+        directory_style: editor.theme.get("ui.text.directory"),
+    };
+    let now = Instant::now();
+    let mut files = file_picker_paths(editor, root);
     log::debug!("file_picker init {:?}", Instant::now().duration_since(now));
 
     let columns = [PickerColumn::new(

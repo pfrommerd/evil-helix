@@ -1087,6 +1087,12 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
         };
 
         match key_event {
+            key!(':') => {
+                return EventResult::Consumed(Some(Box::new(|compositor, cx| {
+                    let prompt = crate::commands::typed::command_mode_prompt(cx.editor);
+                    compositor.push(Box::new(prompt));
+                })));
+            }
             shift!(Tab) | key!(Up) | ctrl!('p') => {
                 self.move_by(1, Direction::Backward);
             }

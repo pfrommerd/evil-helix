@@ -465,6 +465,7 @@ impl MappableCommand {
         file_tree_toggle, "Toggle persistent file-tree visibility",
         file_tree_focus, "Focus or defocus the persistent file tree",
         file_tree_focus_editor, "Return focus from the file tree to the editor",
+        file_tree_search, "Focus or defocus the persistent file-tree search",
         file_tree_refresh, "Refresh the persistent file tree",
         file_tree_collapse_all, "Collapse all directories in the persistent file tree",
         file_tree_width_increase, "Increase the persistent file tree width",
@@ -3639,6 +3640,7 @@ file_tree_action_commands! {
     file_tree_rename => Rename,
     file_tree_delete => Delete,
     file_tree_toggle_hidden => ToggleHidden,
+    file_tree_search => ToggleSearchFocus,
 }
 
 struct PathStyleConfig {

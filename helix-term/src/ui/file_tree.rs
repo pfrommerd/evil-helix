@@ -6,20 +6,35 @@ use std::{
     sync::{atomic::AtomicBool, atomic::Ordering, Arc},
 };
 
+use helix_core::Position;
 use helix_view::{
     editor::Action,
-    graphics::{Rect, Style},
+    graphics::{CursorKind, Rect, Style},
     input::{Event, MouseButton, MouseEventKind},
     Editor,
+};
+use nucleo::{
+    pattern::{CaseMatching, Normalization},
+    Config, Matcher, Nucleo,
 };
 use tui::buffer::Buffer as Surface;
 
 use crate::{
-    compositor::{Callback, Context, EventResult},
+    compositor::{Callback, Component, Context, EventResult},
+    ctrl, key,
     ui::{Prompt, PromptEvent},
 };
 
 const MIN_EDITOR_WIDTH: u16 = 20;
+
+fn new_search_matcher(num_threads: Option<usize>) -> Nucleo<PathBuf> {
+    Nucleo::new(
+        Config::DEFAULT.match_paths(),
+        Arc::new(helix_event::request_redraw),
+        num_threads,
+        1,
+    )
+}
 
 #[derive(Debug, Clone)]
 struct Row {
@@ -72,6 +87,7 @@ pub enum FileTreeAction {
     WidthIncrease,
     WidthDecrease,
     FocusEditor,
+    ToggleSearchFocus,
 }
 
 /// Persistent, keyboard-focused file tree rendered beside the editor.
@@ -91,6 +107,17 @@ pub struct FileTree {
     last_height: usize,
     last_area: Option<Rect>,
     dirty: Arc<AtomicBool>,
+    pending_center: bool,
+    search_prompt: Prompt,
+    search_focused: bool,
+    search_matcher: Nucleo<PathBuf>,
+    search_matches: HashSet<PathBuf>,
+    search_boundary_dirs: HashSet<PathBuf>,
+    search_collapsed: HashSet<PathBuf>,
+    search_expanded: HashSet<PathBuf>,
+    search_restore_path: Option<PathBuf>,
+    search_results_dirty: bool,
+    search_initialized: bool,
 }
 
 impl FileTree {
@@ -113,9 +140,25 @@ impl FileTree {
             width: config.width.clamp(min_width, max_width),
             show_hidden: !config.hidden,
             clipboard: None,
-            last_height: 1,
+            last_height: 0,
             last_area: None,
             dirty: Arc::new(AtomicBool::new(false)),
+            pending_center: false,
+            search_prompt: Prompt::new(
+                Cow::Borrowed(""),
+                None,
+                |_editor, _| Vec::new(),
+                |_cx, _input, _event| {},
+            ),
+            search_focused: false,
+            search_matcher: new_search_matcher(None),
+            search_matches: HashSet::new(),
+            search_boundary_dirs: HashSet::new(),
+            search_collapsed: HashSet::new(),
+            search_expanded: HashSet::new(),
+            search_restore_path: None,
+            search_results_dirty: false,
+            search_initialized: false,
         };
         if tree.visible {
             tree.refresh(editor);
@@ -127,6 +170,7 @@ impl FileTree {
         self.visible = !self.visible;
         if !self.visible {
             self.focused = false;
+            self.search_focused = false;
             self.rows.clear();
             self.directory_entries.clear();
         } else {
@@ -142,6 +186,9 @@ impl FileTree {
         } else {
             self.focused = !self.focused;
         }
+        if !self.focused {
+            self.search_focused = false;
+        }
         if self.focused && editor.config().file_tree.auto_reveal {
             self.reveal_current(editor);
         }
@@ -149,10 +196,44 @@ impl FileTree {
 
     pub fn focus_editor(&mut self) {
         self.focused = false;
+        self.search_focused = false;
     }
 
     pub fn focused(&self) -> bool {
         self.focused
+    }
+
+    pub fn cursor(&self, editor: &Editor) -> (Option<Position>, CursorKind) {
+        if !self.search_focused {
+            return (None, CursorKind::Hidden);
+        }
+        let Some(area) = self.last_area else {
+            return (None, CursorKind::Hidden);
+        };
+        self.search_prompt
+            .cursor(area.clip_left(1).with_height(1), editor)
+    }
+
+    pub fn toggle_search_focus(&mut self, editor: &mut Editor) {
+        let already_focused = self.visible && self.focused;
+        if !self.visible {
+            self.visible = true;
+            self.focused = true;
+            self.refresh(editor);
+        } else if !self.focused {
+            self.focused = true;
+        }
+        if already_focused {
+            self.search_focused = !self.search_focused;
+        } else {
+            if editor.config().file_tree.auto_reveal {
+                self.reveal_current(editor);
+            }
+            self.search_focused = true;
+        }
+        if self.search_focused && !self.search_initialized {
+            self.start_search_scan(editor);
+        }
     }
 
     pub fn increase_width(&mut self, editor: &Editor) {
@@ -200,6 +281,14 @@ impl FileTree {
             self.clipboard = None;
             self.cursor = 0;
             self.scroll = 0;
+            self.search_matcher.restart(true);
+            self.search_matches.clear();
+            self.search_boundary_dirs.clear();
+            self.search_collapsed.clear();
+            self.search_expanded.clear();
+            self.search_restore_path = None;
+            self.search_results_dirty = false;
+            self.search_initialized = false;
         }
 
         if !self.visible {
@@ -219,6 +308,9 @@ impl FileTree {
             }
         }
         self.rebuild_rows(editor);
+        if self.search_initialized || self.search_focused || !self.search_prompt.line().is_empty() {
+            self.start_search_scan(editor);
+        }
         self.marked.retain(|path| path.exists());
         if let Some(selected) = selected {
             if let Some(index) = self.rows.iter().position(|row| row.path == selected) {
@@ -229,6 +321,17 @@ impl FileTree {
     }
 
     pub fn collapse_all(&mut self, editor: &Editor) {
+        if !self.search_prompt.line().is_empty() {
+            self.search_expanded.clear();
+            self.search_collapsed = self
+                .rows
+                .iter()
+                .filter(|row| row.is_dir)
+                .map(|row| row.path.clone())
+                .collect();
+            self.rebuild_rows(editor);
+            return;
+        }
         self.expanded.clear();
         self.expanded.insert(self.root.clone());
         self.directory_entries.retain(|path, _| path == &self.root);
@@ -273,6 +376,9 @@ impl FileTree {
             }
         }
         self.rebuild_rows(editor);
+        if self.search_initialized {
+            self.start_search_scan(editor);
+        }
         self.clamp_cursor();
     }
 
@@ -284,9 +390,135 @@ impl FileTree {
     }
 
     fn rebuild_rows(&mut self, editor: &Editor) {
+        let selected = self.rows.get(self.cursor).map(|row| row.path.clone());
+        if !self.search_prompt.line().is_empty() {
+            self.rebuild_search_rows(editor.config().file_tree.flatten_dirs);
+            self.restore_selected_path(selected.as_deref(), false);
+            return;
+        }
         let mut rows = Vec::new();
         self.collect_rows(&self.root, 0, editor, &mut rows);
         self.rows = rows;
+        self.restore_selected_path(selected.as_deref(), false);
+    }
+
+    fn restore_selected_path(&mut self, selected: Option<&Path>, anchor_ancestors: bool) {
+        if let Some(index) =
+            selected.and_then(|path| self.rows.iter().position(|row| row.path == path))
+        {
+            self.cursor = index;
+        } else {
+            self.cursor = self
+                .rows
+                .iter()
+                .position(|row| self.search_matches.contains(&row.path))
+                .unwrap_or(0);
+        }
+        if anchor_ancestors && !self.rows.is_empty() {
+            self.scroll = first_visible_ancestor_index(&self.rows, self.cursor);
+        }
+        self.clamp_cursor();
+    }
+
+    fn rebuild_search_rows(&mut self, flatten_dirs: bool) {
+        if self.search_prompt.line().is_empty() {
+            return;
+        }
+        let snapshot = self.search_matcher.snapshot();
+        let pattern = snapshot.pattern().column_pattern(0);
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut indices = Vec::new();
+        let matched_paths = snapshot
+            .matched_items(..)
+            .map(|item| {
+                indices.clear();
+                pattern.indices(
+                    item.matcher_columns[0].slice(..),
+                    &mut matcher,
+                    &mut indices,
+                );
+                SearchMatch {
+                    path: item.data.clone(),
+                    boundary: search_match_boundary(&self.root, item.data, &indices),
+                }
+            })
+            .collect::<Vec<_>>();
+        let (rows, matches, boundary_dirs) = build_search_rows(
+            &self.root,
+            &matched_paths,
+            &self.search_collapsed,
+            &self.search_expanded,
+            flatten_dirs,
+        );
+        self.rows = rows;
+        self.search_matches = matches;
+        self.search_boundary_dirs = boundary_dirs;
+    }
+
+    fn search_query_changed(&mut self, previous: &str, editor: &Editor) {
+        let query = self.search_prompt.line().clone();
+        let restoring = if previous.is_empty() && !query.is_empty() {
+            self.search_restore_path = self.rows.get(self.cursor).map(|row| row.path.clone());
+            None
+        } else if !previous.is_empty() && query.is_empty() {
+            self.search_restore_path.take()
+        } else {
+            None
+        };
+        self.search_matcher.pattern.reparse(
+            0,
+            &query,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            query.starts_with(previous),
+        );
+        self.search_collapsed.clear();
+        self.search_expanded.clear();
+        if query.is_empty() {
+            self.search_boundary_dirs.clear();
+            self.rebuild_rows(editor);
+            if let Some(path) = restoring {
+                self.restore_selected_path(Some(&path), false);
+            }
+        }
+    }
+
+    fn start_search_scan(&mut self, editor: &Editor) {
+        self.search_initialized = true;
+        self.search_matcher.restart(true);
+        self.search_results_dirty = false;
+        let root = self.root.clone();
+        let files =
+            super::file_picker_paths_with_hidden(editor, root.clone(), Some(!self.show_hidden));
+        let injector = self.search_matcher.injector();
+        std::thread::spawn(move || {
+            for path in files {
+                injector.push(path, |path, columns| {
+                    columns[0] = path
+                        .strip_prefix(&root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .into();
+                });
+            }
+            helix_event::request_redraw();
+        });
+    }
+
+    fn poll_search_matcher(&mut self, editor: &Editor) {
+        let status = self.search_matcher.tick(10);
+        self.search_results_dirty |= status.changed;
+        if status.running
+            || self.search_matcher.active_injectors() > 0
+            || !self.search_results_dirty
+            || self.search_prompt.line().is_empty()
+        {
+            return;
+        }
+        self.search_results_dirty = false;
+        let selected = self.rows.get(self.cursor).map(|row| row.path.clone());
+        self.rebuild_rows(editor);
+        self.restore_selected_path(selected.as_deref(), true);
     }
 
     fn collect_rows(&self, dir: &Path, depth: usize, editor: &Editor, out: &mut Vec<Row>) {
@@ -403,9 +635,166 @@ fn read_directory(dir: &Path, show_hidden: bool, editor: &Editor) -> Vec<Row> {
         .collect()
 }
 
+struct SearchNode {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+}
+
+struct SearchMatch {
+    path: PathBuf,
+    boundary: PathBuf,
+}
+
+fn first_visible_ancestor_index(rows: &[Row], cursor: usize) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    rows[..=cursor.min(rows.len().saturating_sub(1))]
+        .iter()
+        .rposition(|row| row.depth == 0)
+        .unwrap_or(0)
+}
+
+fn search_match_boundary(root: &Path, file: &Path, indices: &[u32]) -> PathBuf {
+    let relative = file.strip_prefix(root).unwrap_or(file);
+    let Some(last_match) = indices.iter().copied().max() else {
+        return file.to_path_buf();
+    };
+    let component_count = relative
+        .to_string_lossy()
+        .chars()
+        .enumerate()
+        .take_while(|(index, _)| (*index as u32) < last_match)
+        .filter(|(_, ch)| std::path::is_separator(*ch))
+        .count()
+        + 1;
+    root.join(
+        relative
+            .components()
+            .take(component_count)
+            .collect::<PathBuf>(),
+    )
+}
+
+fn collect_search_rows(
+    directory: &Path,
+    depth: usize,
+    children: &HashMap<PathBuf, Vec<SearchNode>>,
+    collapsed: &HashSet<PathBuf>,
+    flatten_dirs: bool,
+    out: &mut Vec<Row>,
+) {
+    let Some(entries) = children.get(directory) else {
+        return;
+    };
+    for entry in entries {
+        let expansion_root = entry.path.clone();
+        let mut path = entry.path.clone();
+        let mut name = entry.name.clone();
+        if flatten_dirs && entry.is_dir {
+            while !collapsed.contains(&path) {
+                let Some([child]) = children.get(&path).map(Vec::as_slice) else {
+                    break;
+                };
+                if !child.is_dir {
+                    break;
+                }
+                name.push('/');
+                name.push_str(&child.name);
+                path = child.path.clone();
+            }
+        }
+        out.push(Row {
+            path: path.clone(),
+            name,
+            depth,
+            is_dir: entry.is_dir,
+            expansion_root,
+        });
+        if entry.is_dir && !collapsed.contains(&path) {
+            collect_search_rows(&path, depth + 1, children, collapsed, flatten_dirs, out);
+        }
+    }
+}
+
+fn build_search_rows(
+    root: &Path,
+    matched_files: &[SearchMatch],
+    collapsed: &HashSet<PathBuf>,
+    expanded: &HashSet<PathBuf>,
+    flatten_dirs: bool,
+) -> (Vec<Row>, HashSet<PathBuf>, HashSet<PathBuf>) {
+    let matches = matched_files
+        .iter()
+        .map(|matched| matched.boundary.clone())
+        .collect::<HashSet<_>>();
+    let boundary_dirs = matched_files
+        .iter()
+        .filter(|matched| matched.boundary != matched.path)
+        .map(|matched| matched.boundary.clone())
+        .collect::<HashSet<_>>();
+    let mut nodes = HashMap::new();
+    for matched in matched_files {
+        nodes.insert(matched.path.clone(), false);
+        let mut parent = matched.path.parent();
+        while let Some(path) = parent {
+            if path == root || !path.starts_with(root) {
+                break;
+            }
+            nodes.insert(path.to_path_buf(), true);
+            parent = path.parent();
+        }
+    }
+
+    let mut children: HashMap<PathBuf, Vec<SearchNode>> = HashMap::new();
+    for (path, is_dir) in nodes {
+        let parent = path.parent().unwrap_or(root).to_path_buf();
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        children.entry(parent).or_default().push(SearchNode {
+            name: name.to_string_lossy().into_owned(),
+            path,
+            is_dir,
+        });
+    }
+    for entries in children.values_mut() {
+        entries.sort_by(|a, b| {
+            (!a.is_dir, a.name.to_lowercase(), &a.name).cmp(&(
+                !b.is_dir,
+                b.name.to_lowercase(),
+                &b.name,
+            ))
+        });
+    }
+
+    let mut rows = Vec::new();
+    let mut effective_collapsed = collapsed.clone();
+    effective_collapsed.extend(
+        boundary_dirs
+            .iter()
+            .filter(|path| !expanded.contains(*path))
+            .cloned(),
+    );
+    collect_search_rows(
+        root,
+        0,
+        &children,
+        &effective_collapsed,
+        flatten_dirs,
+        &mut rows,
+    );
+    (rows, matches, boundary_dirs)
+}
+
 impl FileTree {
     fn clamp_cursor(&mut self) {
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+        if self.last_height == 0 {
+            self.scroll = self.cursor;
+            return;
+        }
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + self.last_height {
@@ -413,10 +802,23 @@ impl FileTree {
         }
     }
 
+    fn center_cursor(&mut self) {
+        if self.rows.is_empty() || self.last_height == 0 {
+            self.scroll = 0;
+            return;
+        }
+        let max_scroll = self.rows.len().saturating_sub(self.last_height);
+        self.scroll = self
+            .cursor
+            .saturating_sub(self.last_height / 2)
+            .min(max_scroll);
+    }
+
     fn move_cursor(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
         }
+        self.pending_center = false;
         self.cursor = self
             .cursor
             .saturating_add_signed(delta)
@@ -428,6 +830,7 @@ impl FileTree {
         if self.rows.is_empty() {
             return;
         }
+        self.pending_center = false;
 
         let first = self.scroll.min(self.rows.len() - 1);
         let visible_len = self.last_height.min(self.rows.len() - first).max(1);
@@ -468,7 +871,7 @@ impl FileTree {
         self.rebuild_rows(editor);
         if let Some(index) = self.rows.iter().position(|row| row.path == path) {
             self.cursor = index;
-            self.clamp_cursor();
+            self.pending_center = true;
         }
     }
 
@@ -489,11 +892,27 @@ impl FileTree {
         }
     }
 
+    fn search_directory_expanded(&self, path: &Path) -> bool {
+        !self.search_collapsed.contains(path)
+            && (!self.search_boundary_dirs.contains(path) || self.search_expanded.contains(path))
+    }
+
     fn toggle_expand(&mut self, editor: &Editor) {
         let Some(row) = self.rows.get(self.cursor).cloned() else {
             return;
         };
         if !row.is_dir {
+            return;
+        }
+        if !self.search_prompt.line().is_empty() {
+            if self.search_directory_expanded(&row.path) {
+                self.search_expanded.remove(&row.path);
+                self.search_collapsed.insert(row.path);
+            } else {
+                self.search_collapsed.remove(&row.path);
+                self.search_expanded.insert(row.path);
+            }
+            self.rebuild_rows(editor);
             return;
         }
         if self.expanded.contains(&row.expansion_root) {
@@ -509,6 +928,25 @@ impl FileTree {
         let Some(row) = self.rows.get(self.cursor).cloned() else {
             return;
         };
+        if !self.search_prompt.line().is_empty() {
+            if row.is_dir && self.search_directory_expanded(&row.path) {
+                self.search_expanded.remove(&row.path);
+                self.search_collapsed.insert(row.path);
+                self.rebuild_rows(editor);
+                return;
+            }
+            if let Some(parent) = row.path.parent() {
+                if let Some(index) = self
+                    .rows
+                    .iter()
+                    .position(|candidate| candidate.path == parent)
+                {
+                    self.cursor = index;
+                    self.clamp_cursor();
+                }
+            }
+            return;
+        }
         if row.is_dir && self.expanded.contains(&row.expansion_root) {
             self.remove_expanded_subtree(&row.expansion_root);
             self.rebuild_rows(editor);
@@ -532,6 +970,14 @@ impl FileTree {
         let Some(row) = self.rows.get(self.cursor).cloned() else {
             return;
         };
+        if !self.search_prompt.line().is_empty() {
+            if row.is_dir && !self.search_directory_expanded(&row.path) {
+                self.search_collapsed.remove(&row.path);
+                self.search_expanded.insert(row.path);
+                self.rebuild_rows(editor);
+            }
+            return;
+        }
         if row.is_dir {
             if !self.expanded.contains(&row.expansion_root) {
                 self.expand_directory(row.path, editor);
@@ -775,6 +1221,25 @@ impl FileTree {
         if !self.visible {
             return EventResult::Ignored(None);
         }
+        self.poll_search_matcher(cx.editor);
+        if self.search_focused {
+            match event {
+                Event::Key(key!(':')) => return EventResult::Ignored(None),
+                Event::Key(key!(Esc) | key!(Enter) | ctrl!('c')) => {
+                    self.search_focused = false;
+                    return EventResult::Consumed(None);
+                }
+                Event::Key(_) | Event::Paste(_) => {
+                    let previous = self.search_prompt.line().clone();
+                    let _ = self.search_prompt.handle_event(event, cx);
+                    if self.search_prompt.line() != &previous {
+                        self.search_query_changed(&previous, cx.editor);
+                    }
+                    return EventResult::Consumed(None);
+                }
+                _ => {}
+            }
+        }
         if let Event::Mouse(mouse) = event {
             let Some(area) = self.last_area else {
                 return EventResult::Ignored(None);
@@ -790,7 +1255,15 @@ impl FileTree {
                 MouseEventKind::ScrollUp => self.move_cursor(-3),
                 MouseEventKind::ScrollDown => self.move_cursor(3),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    let index = self.scroll + usize::from(mouse.row - area.y);
+                    if mouse.row == area.y {
+                        self.focused = true;
+                        self.search_focused = true;
+                        if !self.search_initialized {
+                            self.start_search_scan(cx.editor);
+                        }
+                        return EventResult::Consumed(None);
+                    }
+                    let index = self.scroll + usize::from(mouse.row - area.y - 1);
                     if index < self.rows.len() {
                         let same = self.focused && self.cursor == index;
                         let disclosure_column = area.x.saturating_add(
@@ -798,7 +1271,9 @@ impl FileTree {
                                 .unwrap_or(u16::MAX),
                         );
                         self.focused = true;
+                        self.search_focused = false;
                         self.cursor = index;
+                        self.pending_center = false;
                         self.clamp_cursor();
                         if self.rows[index].is_dir && (same || mouse.column == disclosure_column) {
                             self.toggle_expand(cx.editor);
@@ -830,10 +1305,12 @@ impl FileTree {
                 self.move_cursor_to_visible_row(VisiblePosition::Bottom);
             }
             FileTreeAction::CursorFirst => {
+                self.pending_center = false;
                 self.cursor = 0;
                 self.clamp_cursor();
             }
             FileTreeAction::CursorLast => {
+                self.pending_center = false;
                 self.cursor = self.rows.len().saturating_sub(1);
                 self.clamp_cursor();
             }
@@ -869,20 +1346,28 @@ impl FileTree {
             FileTreeAction::WidthIncrease => self.increase_width(editor),
             FileTreeAction::WidthDecrease => self.decrease_width(editor),
             FileTreeAction::FocusEditor => self.focus_editor(),
+            FileTreeAction::ToggleSearchFocus => self.toggle_search_focus(editor),
         }
         None
     }
 
-    pub fn render(&mut self, area: Rect, surface: &mut Surface, editor: &mut Editor) {
+    pub fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
         self.last_area = Some(area);
         if self.dirty.swap(false, Ordering::Relaxed)
             || helix_stdx::env::current_working_dir() != self.root
         {
-            self.refresh(editor);
+            self.refresh(cx.editor);
         }
-        self.last_height = area.height.max(1) as usize;
-        self.clamp_cursor();
+        self.poll_search_matcher(cx.editor);
+        self.last_height = area.height.saturating_sub(1) as usize;
+        if self.pending_center {
+            self.center_cursor();
+            self.pending_center = false;
+        } else {
+            self.clamp_cursor();
+        }
 
+        let editor = &mut *cx.editor;
         let background = editor.theme.get("ui.background");
         let text = editor.theme.get("ui.text");
         let directory = editor.theme.get("ui.text.directory");
@@ -910,14 +1395,19 @@ impl FileTree {
             .enumerate()
         {
             let index = self.scroll + screen_row;
-            let y = area.y + screen_row as u16;
+            let y = area.y + 1 + screen_row as u16;
             let marker = if self.marked.contains(&row.path) {
                 "●"
             } else {
                 " "
             };
             let disclosure = if row.is_dir {
-                if self.expanded.contains(&row.path) {
+                let expanded = if self.search_prompt.line().is_empty() {
+                    self.expanded.contains(&row.path)
+                } else {
+                    self.search_directory_expanded(&row.path)
+                };
+                if expanded {
                     "▾"
                 } else {
                     "▸"
@@ -932,7 +1422,7 @@ impl FileTree {
             if active_path.as_ref() == Some(&row.path) {
                 style = style.patch(editor.theme.get("ui.text.focus"));
             }
-            if index == self.cursor && self.focused {
+            if index == self.cursor && self.focused && !self.search_focused {
                 style = style.patch(selected);
             }
             surface.set_stringn(
@@ -963,6 +1453,8 @@ impl FileTree {
                 }
             }
         }
+        let search_area = area.clip_left(1).with_height(1);
+        self.search_prompt.render(search_area, surface, cx);
     }
 }
 
@@ -1056,6 +1548,22 @@ mod tests {
             last_height: 1,
             last_area: None,
             dirty: Arc::new(AtomicBool::new(false)),
+            pending_center: false,
+            search_prompt: Prompt::new(
+                Cow::Borrowed(""),
+                None,
+                |_editor, _| Vec::new(),
+                |_cx, _input, _event| {},
+            ),
+            search_focused: false,
+            search_matcher: new_search_matcher(Some(1)),
+            search_matches: HashSet::new(),
+            search_boundary_dirs: HashSet::new(),
+            search_collapsed: HashSet::new(),
+            search_expanded: HashSet::new(),
+            search_restore_path: None,
+            search_results_dirty: false,
+            search_initialized: false,
         }
     }
 
@@ -1101,6 +1609,331 @@ mod tests {
         tree.move_cursor_to_visible_row(VisiblePosition::Bottom);
         assert_eq!(tree.cursor, 7);
         assert_eq!(tree.scroll, 5);
+    }
+
+    #[test]
+    fn centers_cursor_and_clamps_at_tree_edges() {
+        let mut tree = empty_tree(PathBuf::from("/workspace"));
+        add_rows(&mut tree, 20);
+        tree.last_height = 5;
+
+        tree.cursor = 10;
+        tree.center_cursor();
+        assert_eq!(tree.scroll, 8);
+
+        tree.cursor = 1;
+        tree.center_cursor();
+        assert_eq!(tree.scroll, 0);
+
+        tree.cursor = 19;
+        tree.center_cursor();
+        assert_eq!(tree.scroll, 15);
+    }
+
+    #[test]
+    fn nucleo_search_matches_workspace_relative_paths() {
+        let mut matcher = new_search_matcher(Some(1));
+        let injector = matcher.injector();
+        for path in ["src/main.rs", "tests/helper.rs"] {
+            injector.push(PathBuf::from(path), |_path, columns| {
+                columns[0] = path.into();
+            });
+        }
+        drop(injector);
+        matcher
+            .pattern
+            .reparse(0, "smain", CaseMatching::Smart, Normalization::Smart, false);
+
+        for _ in 0..100 {
+            if !matcher.tick(10).running {
+                break;
+            }
+        }
+
+        assert_eq!(
+            matcher
+                .snapshot()
+                .matched_items(..)
+                .map(|item| item.data.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("src/main.rs")]
+        );
+    }
+
+    #[test]
+    fn nucleo_match_indices_identify_a_directory_boundary() {
+        let root = PathBuf::from("/workspace");
+        let mut matcher = new_search_matcher(Some(1));
+        let injector = matcher.injector();
+        let path = root.join("foo/bar/a");
+        injector.push(path.clone(), |_, columns| {
+            columns[0] = "foo/bar/a".into();
+        });
+        drop(injector);
+        matcher
+            .pattern
+            .reparse(0, "bar", CaseMatching::Smart, Normalization::Smart, false);
+
+        for _ in 0..100 {
+            if !matcher.tick(10).running {
+                break;
+            }
+        }
+
+        let snapshot = matcher.snapshot();
+        let item = snapshot.matched_items(..).next().unwrap();
+        let mut indices = Vec::new();
+        snapshot.pattern().column_pattern(0).indices(
+            item.matcher_columns[0].slice(..),
+            &mut Matcher::new(Config::DEFAULT.match_paths()),
+            &mut indices,
+        );
+        assert_eq!(
+            search_match_boundary(&root, &path, &indices),
+            root.join("foo/bar")
+        );
+    }
+
+    #[test]
+    fn matched_files_are_rendered_with_their_ancestors() {
+        let root = PathBuf::from("/workspace");
+        let matches = ["src/main.rs", "tests/main_spec.rs"]
+            .into_iter()
+            .map(|path| {
+                let path = root.join(path);
+                SearchMatch {
+                    boundary: path.clone(),
+                    path,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let (rows, direct_matches, _) =
+            build_search_rows(&root, &matches, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.path.strip_prefix(&root).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                Path::new("src"),
+                Path::new("src/main.rs"),
+                Path::new("tests"),
+                Path::new("tests/main_spec.rs"),
+            ]
+        );
+        assert!(!direct_matches.contains(&root.join("src")));
+        assert!(direct_matches.contains(&root.join("src/main.rs")));
+    }
+
+    #[test]
+    fn filename_matches_do_not_mark_ancestor_directories() {
+        let root = PathBuf::from("/workspace");
+        let path = root.join("tests/fixture.rs");
+        let matches = vec![SearchMatch {
+            boundary: path.clone(),
+            path,
+        }];
+
+        let (rows, direct_matches, _) =
+            build_search_rows(&root, &matches, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, root.join("tests"));
+        assert!(!direct_matches.contains(&root.join("tests")));
+        assert!(direct_matches.contains(&root.join("tests/fixture.rs")));
+    }
+
+    #[test]
+    fn filtered_collapses_hide_only_the_selected_branch() {
+        let root = PathBuf::from("/workspace");
+        let matches = ["src/main.rs", "tests/main.rs"]
+            .into_iter()
+            .map(|path| {
+                let path = root.join(path);
+                SearchMatch {
+                    boundary: path.clone(),
+                    path,
+                }
+            })
+            .collect::<Vec<_>>();
+        let collapsed = HashSet::from([root.join("src")]);
+
+        let (rows, _, _) = build_search_rows(&root, &matches, &collapsed, &HashSet::new(), false);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.path.strip_prefix(&root).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                Path::new("src"),
+                Path::new("tests"),
+                Path::new("tests/main.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_matches_stop_at_the_deepest_matched_component() {
+        let root = PathBuf::from("/workspace");
+        let matches = ["foo/bar/a", "foo/bar/b"]
+            .into_iter()
+            .map(|path| SearchMatch {
+                path: root.join(path),
+                boundary: root.join("foo/bar"),
+            })
+            .collect::<Vec<_>>();
+
+        let (rows, direct_matches, boundary_dirs) =
+            build_search_rows(&root, &matches, &HashSet::new(), &HashSet::new(), false);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.path.strip_prefix(&root).unwrap())
+                .collect::<Vec<_>>(),
+            [Path::new("foo"), Path::new("foo/bar")]
+        );
+        assert_eq!(direct_matches, HashSet::from([root.join("foo/bar")]));
+        assert_eq!(boundary_dirs, HashSet::from([root.join("foo/bar")]));
+    }
+
+    #[test]
+    fn matched_directory_can_be_expanded_to_reveal_descendants() {
+        let root = PathBuf::from("/workspace");
+        let matches = ["foo/bar/a", "foo/bar/b"]
+            .into_iter()
+            .map(|path| SearchMatch {
+                path: root.join(path),
+                boundary: root.join("foo/bar"),
+            })
+            .collect::<Vec<_>>();
+        let expanded = HashSet::from([root.join("foo/bar")]);
+
+        let (rows, _, _) = build_search_rows(&root, &matches, &HashSet::new(), &expanded, false);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.path.strip_prefix(&root).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                Path::new("foo"),
+                Path::new("foo/bar"),
+                Path::new("foo/bar/a"),
+                Path::new("foo/bar/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn filtered_single_directory_chains_are_flattened() {
+        let root = PathBuf::from("/workspace");
+        let path = root.join("foo/bar/baz/file.rs");
+        let matches = vec![SearchMatch {
+            boundary: path.clone(),
+            path: path.clone(),
+        }];
+
+        let (rows, _, _) =
+            build_search_rows(&root, &matches, &HashSet::new(), &HashSet::new(), true);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| {
+                    (
+                        row.name.clone(),
+                        row.path.clone(),
+                        row.expansion_root.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "foo/bar/baz".to_string(),
+                    root.join("foo/bar/baz"),
+                    root.join("foo"),
+                ),
+                ("file.rs".to_string(), path.clone(), path),
+            ]
+        );
+    }
+
+    #[test]
+    fn flattened_matched_directory_remains_a_collapsible_boundary() {
+        let root = PathBuf::from("/workspace");
+        let file = root.join("foo/bar/file.rs");
+        let matches = vec![SearchMatch {
+            path: file,
+            boundary: root.join("foo/bar"),
+        }];
+
+        let (collapsed_rows, _, _) =
+            build_search_rows(&root, &matches, &HashSet::new(), &HashSet::new(), true);
+        assert_eq!(collapsed_rows.len(), 1);
+        assert_eq!(collapsed_rows[0].name, "foo/bar");
+        assert_eq!(collapsed_rows[0].path, root.join("foo/bar"));
+
+        let expanded = HashSet::from([root.join("foo/bar")]);
+        let (expanded_rows, _, _) =
+            build_search_rows(&root, &matches, &HashSet::new(), &expanded, true);
+        assert_eq!(
+            expanded_rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["foo/bar", "file.rs"]
+        );
+    }
+
+    #[test]
+    fn selected_search_result_scrolls_from_its_top_level_ancestor() {
+        let root = PathBuf::from("/workspace");
+        let rows = [
+            ("foo", 0),
+            ("bar", 1),
+            ("result.rs", 2),
+            ("other", 0),
+            ("result.rs", 1),
+        ]
+        .into_iter()
+        .map(|(name, depth)| Row {
+            path: root.join(name),
+            name: name.into(),
+            depth,
+            is_dir: depth < 2,
+            expansion_root: root.clone(),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(first_visible_ancestor_index(&rows, 2), 0);
+        assert_eq!(first_visible_ancestor_index(&rows, 4), 3);
+    }
+
+    #[test]
+    fn restoring_selection_after_collapse_preserves_scroll() {
+        let mut tree = empty_tree(PathBuf::from("/workspace"));
+        add_rows(&mut tree, 10);
+        for row in &mut tree.rows[1..] {
+            row.depth = 1;
+        }
+        tree.last_height = 5;
+        tree.scroll = 3;
+        tree.cursor = 4;
+        let selected = tree.rows[tree.cursor].path.clone();
+
+        tree.restore_selected_path(Some(&selected), false);
+
+        assert_eq!(tree.cursor, 4);
+        assert_eq!(tree.scroll, 3);
+    }
+
+    #[test]
+    fn match_indices_select_their_containing_path_component() {
+        let root = Path::new("/workspace");
+        let file = root.join("foo/bar/a");
+
+        assert_eq!(
+            search_match_boundary(root, &file, &[4, 5, 6]),
+            root.join("foo/bar")
+        );
+        assert_eq!(search_match_boundary(root, &file, &[8]), file);
+        assert_eq!(search_match_boundary(root, &file, &[]), file);
     }
 
     #[test]
@@ -1165,6 +1998,11 @@ mod tests {
         tree.visible = false;
 
         assert!(tree.watched_directories().is_empty());
+    }
+
+    #[test]
+    fn hidden_files_are_hidden_by_default() {
+        assert!(helix_view::editor::FileTreeConfig::default().hidden);
     }
 
     #[test]

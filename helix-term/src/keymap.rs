@@ -401,9 +401,43 @@ mod tests {
     }
 
     #[test]
-    fn file_tree_uses_configurable_mark_binding() {
+    fn file_tree_uses_configurable_bindings() {
         let keymaps = default();
+        assert_eq!(
+            keymaps[&Mode::Normal].search(&[key!('t')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_focus))
+        );
+        assert_eq!(
+            keymaps[&Mode::Normal].search(&[key!('T')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_toggle))
+        );
+        assert_eq!(
+            keymaps[&Mode::Select].search(&[key!('t')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::extend_till_char))
+        );
+        assert_eq!(
+            keymaps[&Mode::Select].search(&[key!('T')]),
+            Some(&KeyTrie::MappableCommand(
+                MappableCommand::extend_till_prev_char
+            ))
+        );
+        for mode in [Mode::Normal, Mode::Select] {
+            assert_eq!(
+                keymaps[&mode].search(&[key!(' '), key!('q')]),
+                Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_search))
+            );
+        }
         let file_tree = &keymaps[&Mode::FileTree];
+        assert_eq!(
+            file_tree.search(&[key!(':')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::command_mode))
+        );
+        assert_eq!(
+            file_tree.search(&[key!('.')]),
+            Some(&KeyTrie::MappableCommand(
+                MappableCommand::file_tree_toggle_hidden
+            ))
+        );
         assert_eq!(
             file_tree.search(&[key!('w')]),
             Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_mark))
@@ -415,6 +449,34 @@ mod tests {
         assert_eq!(
             file_tree.search(&[key!(' '), key!('T')]),
             Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_toggle))
+        );
+        assert_eq!(
+            file_tree.search(&[key!(' '), key!('q')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_search))
+        );
+        assert_eq!(
+            file_tree.search(&[key!('q')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_search))
+        );
+        assert_eq!(
+            file_tree.search(&[key!('t')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_focus))
+        );
+        assert_eq!(
+            file_tree.search(&[key!('T')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_toggle))
+        );
+        assert_eq!(
+            file_tree.search(&[key!('g')]),
+            Some(&KeyTrie::MappableCommand(
+                MappableCommand::file_tree_cursor_first
+            ))
+        );
+        assert_eq!(
+            file_tree.search(&[key!('G')]),
+            Some(&KeyTrie::MappableCommand(
+                MappableCommand::file_tree_cursor_last
+            ))
         );
     }
 

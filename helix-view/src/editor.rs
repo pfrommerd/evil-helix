@@ -280,7 +280,7 @@ pub struct FileTreeConfig {
     pub max_width: u16,
     /// Number of columns added or removed by resize commands.
     pub width_step: u16,
-    /// Hide hidden files.
+    /// Hide hidden files. Defaults to true.
     pub hidden: bool,
     /// Follow symbolic links while browsing.
     pub follow_symlinks: bool,
@@ -310,7 +310,7 @@ impl Default for FileTreeConfig {
             min_width: 20,
             max_width: 80,
             width_step: 4,
-            hidden: false,
+            hidden: true,
             follow_symlinks: false,
             ignore: false,
             parents: false,

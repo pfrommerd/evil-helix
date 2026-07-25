@@ -1766,7 +1766,7 @@ impl Component for EditorView {
         }
 
         if let Some(file_tree_area) = file_tree_area {
-            self.file_tree.render(file_tree_area, surface, cx.editor);
+            self.file_tree.render(file_tree_area, surface, cx);
         }
 
         let context_menu_visible = self.context_menu_started_at.is_some_and(|started| {
@@ -1862,7 +1862,7 @@ impl Component for EditorView {
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
         if self.file_tree.focused() {
-            return (None, CursorKind::Hidden);
+            return self.file_tree.cursor(editor);
         }
         match editor.cursor() {
             // all block cursors are drawn manually
