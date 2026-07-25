@@ -111,7 +111,10 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_diff_base(file, trust_full),
-            Self::None => bail!("No diff support compiled in"),
+            Self::None => {
+                let _ = (file, trust_full);
+                bail!("No diff support compiled in")
+            }
         }
     }
 
@@ -123,7 +126,10 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_current_head_name(file, trust_full),
-            Self::None => bail!("No diff support compiled in"),
+            Self::None => {
+                let _ = (file, trust_full);
+                bail!("No diff support compiled in")
+            }
         }
     }
 
@@ -136,7 +142,10 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::for_each_changed_file(cwd, trust_full, f),
-            Self::None => bail!("No diff support compiled in"),
+            Self::None => {
+                let _ = (cwd, trust_full, f);
+                bail!("No diff support compiled in")
+            }
         }
     }
 }

@@ -297,6 +297,8 @@ This layer is a kludge of mappings, mostly pickers.
 | `F`     | Open file picker at current working directory                           | `file_picker_in_current_directory`         |
 | `e`     | Open file explorer at workspace root                                     | `file_explorer`                            |
 | `.`     | Open file explorer at current buffer's directory                        | `file_explorer_in_current_buffer_directory`|
+| `t`     | Focus or defocus the persistent file tree                               | `file_tree_focus`                          |
+| `T`     | Toggle persistent file-tree visibility                                  | `file_tree_toggle`                         |
 | `b`     | Open buffer picker                                                      | `buffer_picker`                            |
 | `j`     | Open jumplist picker                                                    | `jumplist_picker`                          |
 | `g`     | Open changed file picker                                                | `changed_file_picker`                      |
@@ -321,6 +323,32 @@ This layer is a kludge of mappings, mostly pickers.
 | `R`     | Replace selections by clipboard contents                                | `replace_selections_with_clipboard`        |
 | `/`     | Global search in workspace folder                                       | `global_search`                            |
 | `?`     | Open command palette                                                    | `command_palette`                          |
+
+#### File-tree mode
+
+Active while the persistent file tree is focused. These bindings use the standard keymap system
+and can be overridden under `[keys.file-tree]`.
+
+| Key | Description | Command |
+| --- | --- | --- |
+| `j`, `Down` | Move down | `file_tree_cursor_down` |
+| `k`, `Up` | Move up | `file_tree_cursor_up` |
+| `Ctrl-d`, `PageDown` | Move down half a page | `file_tree_page_down` |
+| `Ctrl-u`, `PageUp` | Move up half a page | `file_tree_page_up` |
+| `Home`, `End` | Select the first or last entry | `file_tree_cursor_first`, `file_tree_cursor_last` |
+| `h`, `Left` | Collapse or select the parent | `file_tree_collapse` |
+| `l`, `Right` | Expand a directory | `file_tree_expand` |
+| `Enter` | Open a file or toggle a directory | `file_tree_open` |
+| `Ctrl-s`, `Ctrl-v` | Open in a horizontal or vertical split | `file_tree_open_hsplit`, `file_tree_open_vsplit` |
+| `w` | Mark or unmark an entry | `file_tree_mark` |
+| `y`, `x`, `p` | Copy, cut, or paste entries | `file_tree_copy`, `file_tree_cut`, `file_tree_paste` |
+| `a`, `A` | Create a file or directory | `file_tree_create_file`, `file_tree_create_directory` |
+| `r`, `d` | Rename or delete entries | `file_tree_rename`, `file_tree_delete` |
+| `R`, `z`, `.` | Refresh, collapse all, or toggle hidden entries | `file_tree_refresh`, `file_tree_collapse_all`, `file_tree_toggle_hidden` |
+| `+`, `-` | Increase or decrease panel width | `file_tree_width_increase`, `file_tree_width_decrease` |
+| `Escape` | Return focus to the editor | `file_tree_focus_editor` |
+| `Space-t` | Return focus to the editor | `file_tree_focus` |
+| `Space-T` | Hide the file tree | `file_tree_toggle` |
 
 > 💡 Global search displays results in a fuzzy picker, use `Space + '` to bring it back up after opening a file.
 

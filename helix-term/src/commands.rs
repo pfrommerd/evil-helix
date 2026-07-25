@@ -462,6 +462,33 @@ impl MappableCommand {
         file_explorer, "Open file explorer in workspace root",
         file_explorer_in_current_buffer_directory, "Open file explorer at current buffer's directory",
         file_explorer_in_current_directory, "Open file explorer at current working directory",
+        file_tree_toggle, "Toggle persistent file-tree visibility",
+        file_tree_focus, "Focus or defocus the persistent file tree",
+        file_tree_focus_editor, "Return focus from the file tree to the editor",
+        file_tree_refresh, "Refresh the persistent file tree",
+        file_tree_collapse_all, "Collapse all directories in the persistent file tree",
+        file_tree_width_increase, "Increase the persistent file tree width",
+        file_tree_width_decrease, "Decrease the persistent file tree width",
+        file_tree_cursor_up, "Move the file-tree cursor up",
+        file_tree_cursor_down, "Move the file-tree cursor down",
+        file_tree_page_up, "Move the file-tree cursor up half a page",
+        file_tree_page_down, "Move the file-tree cursor down half a page",
+        file_tree_cursor_first, "Move to the first file-tree entry",
+        file_tree_cursor_last, "Move to the last file-tree entry",
+        file_tree_collapse, "Collapse a directory or select its parent",
+        file_tree_expand, "Expand the selected directory",
+        file_tree_open, "Open the selected file",
+        file_tree_open_hsplit, "Open the selected file in a horizontal split",
+        file_tree_open_vsplit, "Open the selected file in a vertical split",
+        file_tree_mark, "Mark or unmark the selected file-tree entry",
+        file_tree_copy, "Copy marked file-tree entries",
+        file_tree_cut, "Cut marked file-tree entries",
+        file_tree_paste, "Paste file-tree entries",
+        file_tree_create_file, "Create a file from the file tree",
+        file_tree_create_directory, "Create a directory from the file tree",
+        file_tree_rename, "Rename the selected file-tree entry",
+        file_tree_delete, "Delete marked file-tree entries",
+        file_tree_toggle_hidden, "Toggle hidden entries in the file tree",
         code_action, "Perform code action",
         buffer_picker, "Open buffer picker",
         jumplist_picker, "Open jumplist picker",
@@ -3508,6 +3535,106 @@ fn file_explorer_in_current_directory(cx: &mut Context) {
     }
 }
 
+fn file_tree_toggle(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.toggle_file_tree(cx.editor);
+        }
+    }));
+}
+
+fn file_tree_focus(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.focus_file_tree(cx.editor);
+        }
+    }));
+}
+
+fn file_tree_focus_editor(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, _cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.focus_editor();
+        }
+    }));
+}
+
+fn file_tree_refresh(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.refresh_file_tree(cx.editor);
+        }
+    }));
+}
+
+fn file_tree_collapse_all(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.collapse_file_tree(cx.editor);
+        }
+    }));
+}
+
+fn file_tree_width_increase(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.increase_file_tree_width(cx.editor);
+        }
+    }));
+}
+
+fn file_tree_width_decrease(cx: &mut Context) {
+    cx.callback.push(Box::new(|compositor, cx| {
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            editor_view.decrease_file_tree_width(cx.editor);
+        }
+    }));
+}
+
+fn execute_file_tree_action(cx: &mut Context, action: ui::FileTreeAction) {
+    cx.callback.push(Box::new(move |compositor, cx| {
+        let followup = compositor
+            .find::<ui::EditorView>()
+            .and_then(|editor_view| editor_view.execute_file_tree_action(action, cx.editor));
+        if let Some(followup) = followup {
+            followup(compositor, cx);
+        }
+    }));
+}
+
+macro_rules! file_tree_action_commands {
+    ($($command:ident => $action:ident),* $(,)?) => {
+        $(
+            fn $command(cx: &mut Context) {
+                execute_file_tree_action(cx, ui::FileTreeAction::$action);
+            }
+        )*
+    };
+}
+
+file_tree_action_commands! {
+    file_tree_cursor_up => CursorUp,
+    file_tree_cursor_down => CursorDown,
+    file_tree_page_up => PageUp,
+    file_tree_page_down => PageDown,
+    file_tree_cursor_first => CursorFirst,
+    file_tree_cursor_last => CursorLast,
+    file_tree_collapse => Collapse,
+    file_tree_expand => Expand,
+    file_tree_open => Open,
+    file_tree_open_hsplit => OpenHorizontalSplit,
+    file_tree_open_vsplit => OpenVerticalSplit,
+    file_tree_mark => Mark,
+    file_tree_copy => Copy,
+    file_tree_cut => Cut,
+    file_tree_paste => Paste,
+    file_tree_create_file => CreateFile,
+    file_tree_create_directory => CreateDirectory,
+    file_tree_rename => Rename,
+    file_tree_delete => Delete,
+    file_tree_toggle_hidden => ToggleHidden,
+}
+
 struct PathStyleConfig {
     directory_style: Style,
     number_style: Style,
@@ -3829,9 +3956,13 @@ pub fn command_palette(cx: &mut Context) {
 
     cx.callback.push(Box::new(
         move |compositor: &mut Compositor, cx: &mut compositor::Context| {
-            let keymap = compositor.find::<ui::EditorView>().unwrap().keymaps.map()
-                [&cx.editor.mode]
-                .reverse_map();
+            let editor_view = compositor.find::<ui::EditorView>().unwrap();
+            let keymap_mode = if editor_view.file_tree_focused() {
+                Mode::FileTree
+            } else {
+                cx.editor.mode
+            };
+            let keymap = editor_view.keymaps.map()[&keymap_mode].reverse_map();
 
             let commands = MappableCommand::STATIC_COMMAND_LIST.iter().cloned().chain(
                 typed::TYPABLE_COMMAND_LIST
@@ -5273,7 +5404,7 @@ pub(crate) fn paste_bracketed_value(cx: &mut Context, contents: String) {
     let count = cx.count();
     let paste = match cx.editor.mode {
         Mode::Insert | Mode::Select => Paste::Cursor,
-        Mode::Normal => Paste::Before,
+        Mode::Normal | Mode::FileTree => Paste::Before,
     };
     let (view, doc) = current!(cx.editor);
     paste_impl(&[contents], doc, view, paste, count, cx.editor.mode);

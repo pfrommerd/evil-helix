@@ -1,6 +1,7 @@
 mod completion;
 mod document;
 pub(crate) mod editor;
+mod file_tree;
 mod info;
 pub mod lsp;
 mod markdown;
@@ -20,6 +21,7 @@ use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use completion::Completion;
 pub use editor::EditorView;
+pub(crate) use file_tree::FileTreeAction;
 use helix_stdx::rope;
 use helix_view::theme::Style;
 pub use markdown::Markdown;
@@ -35,7 +37,15 @@ use helix_view::Editor;
 use tui::text::{Span, Spans};
 
 use std::path::Path;
-use std::{error::Error, path::PathBuf};
+use std::{error::Error, path::PathBuf, time::Duration};
+
+pub(crate) fn context_menu_visible(
+    typed_len: usize,
+    elapsed: Duration,
+    config: &helix_view::editor::Config,
+) -> bool {
+    typed_len > config.context_menu_trigger_len || elapsed >= config.context_menu_timeout
+}
 
 struct Utf8PathBuf {
     path: String,
@@ -819,5 +829,17 @@ mod tests {
         File::create(file).unwrap();
 
         assert_eq!(get_child_if_single_dir(root.path()), None);
+    }
+
+    #[test]
+    fn context_menu_respects_character_and_time_thresholds() {
+        let config = helix_view::editor::Config::default();
+        assert!(!context_menu_visible(
+            1,
+            Duration::from_millis(4999),
+            &config
+        ));
+        assert!(context_menu_visible(2, Duration::ZERO, &config));
+        assert!(context_menu_visible(1, Duration::from_secs(5), &config));
     }
 }

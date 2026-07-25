@@ -401,6 +401,24 @@ mod tests {
     }
 
     #[test]
+    fn file_tree_uses_configurable_mark_binding() {
+        let keymaps = default();
+        let file_tree = &keymaps[&Mode::FileTree];
+        assert_eq!(
+            file_tree.search(&[key!('w')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_mark))
+        );
+        assert_eq!(
+            file_tree.search(&[key!(' '), key!('t')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_focus))
+        );
+        assert_eq!(
+            file_tree.search(&[key!(' '), key!('T')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_toggle))
+        );
+    }
+
+    #[test]
     fn merge_partial_keys() {
         let keymap = hashmap! {
             Mode::Normal => keymap!({ "Normal mode"

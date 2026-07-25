@@ -247,6 +247,9 @@ mod tests {
 
             [keys.normal]
             A-F12 = "move_next_word_end"
+
+            [keys.file-tree]
+            m = "file_tree_mark"
         "#;
 
         let mut keys = keymap::default_evil();
@@ -259,6 +262,9 @@ mod tests {
                 }),
                 Mode::Normal => keymap!({ "Normal mode"
                     "A-F12" => move_next_word_end,
+                }),
+                Mode::FileTree => keymap!({ "File tree"
+                    "m" => file_tree_mark,
                 }),
             },
         );

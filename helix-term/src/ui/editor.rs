@@ -7,6 +7,7 @@ use crate::{
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
+        file_tree::{FileTree, FileTreeAction},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
         Completion, ProgressSpinners,
@@ -31,7 +32,7 @@ use helix_view::{
     keyboard::{KeyCode, KeyModifiers},
     Document, Editor, Theme, View,
 };
-use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
+use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc, time::Instant};
 
 use tui::{buffer::Buffer as Surface, text::Span};
 
@@ -44,6 +45,8 @@ pub struct EditorView {
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
+    file_tree: FileTree,
+    context_menu_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +61,7 @@ pub enum InsertEvent {
 }
 
 impl EditorView {
-    pub fn new(keymaps: Keymaps) -> Self {
+    pub fn new(keymaps: Keymaps, editor: &Editor) -> Self {
         Self {
             keymaps,
             on_next_key: None,
@@ -67,7 +70,49 @@ impl EditorView {
             completion: None,
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
+            file_tree: FileTree::new(editor),
+            context_menu_started_at: None,
         }
+    }
+
+    pub fn toggle_file_tree(&mut self, editor: &mut Editor) {
+        self.file_tree.toggle(editor);
+    }
+
+    pub fn focus_file_tree(&mut self, editor: &mut Editor) {
+        self.file_tree.toggle_focus(editor);
+    }
+
+    pub fn focus_editor(&mut self) {
+        self.file_tree.focus_editor();
+    }
+
+    pub fn file_tree_focused(&self) -> bool {
+        self.file_tree.focused()
+    }
+
+    pub fn refresh_file_tree(&mut self, editor: &Editor) {
+        self.file_tree.refresh(editor);
+    }
+
+    pub fn collapse_file_tree(&mut self, editor: &Editor) {
+        self.file_tree.collapse_all(editor);
+    }
+
+    pub fn increase_file_tree_width(&mut self, editor: &Editor) {
+        self.file_tree.increase_width(editor);
+    }
+
+    pub fn decrease_file_tree_width(&mut self, editor: &Editor) {
+        self.file_tree.decrease_width(editor);
+    }
+
+    pub fn execute_file_tree_action(
+        &mut self,
+        action: FileTreeAction,
+        editor: &mut Editor,
+    ) -> Option<crate::compositor::Callback> {
+        self.file_tree.execute(action, editor)
     }
 
     pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
@@ -559,14 +604,14 @@ impl EditorView {
         let cursor_scope = match mode {
             Mode::Insert => theme.find_highlight_exact("ui.cursor.insert"),
             Mode::Select => theme.find_highlight_exact("ui.cursor.select"),
-            Mode::Normal => theme.find_highlight_exact("ui.cursor.normal"),
+            Mode::Normal | Mode::FileTree => theme.find_highlight_exact("ui.cursor.normal"),
         }
         .unwrap_or(base_cursor_scope);
 
         let primary_cursor_scope = match mode {
             Mode::Insert => theme.find_highlight_exact("ui.cursor.primary.insert"),
             Mode::Select => theme.find_highlight_exact("ui.cursor.primary.select"),
-            Mode::Normal => theme.find_highlight_exact("ui.cursor.primary.normal"),
+            Mode::Normal | Mode::FileTree => theme.find_highlight_exact("ui.cursor.primary.normal"),
         }
         .unwrap_or(base_primary_cursor_scope);
 
@@ -935,10 +980,23 @@ impl EditorView {
         cxt: &mut commands::Context,
         event: KeyEvent,
     ) -> Option<KeymapResult> {
-        let mut last_mode = mode;
+        let mut last_mode = cxt.editor.mode();
+        let was_pending = !self.keymaps.pending().is_empty();
         self.pseudo_pending.extend(self.keymaps.pending());
         let key_result = self.keymaps.get(mode, event);
         cxt.editor.autoinfo = self.keymaps.sticky().map(|node| node.infobox());
+        match &key_result {
+            KeymapResult::Pending(_) if !was_pending => {
+                self.context_menu_started_at = Some(Instant::now());
+                let timeout = cxt.editor.config().context_menu_timeout;
+                tokio::spawn(async move {
+                    tokio::time::sleep(timeout).await;
+                    helix_event::request_redraw();
+                });
+            }
+            KeymapResult::Pending(_) => {}
+            _ => self.context_menu_started_at = None,
+        }
 
         let mut execute_command = |command: &commands::MappableCommand| {
             command.execute(cxt);
@@ -978,6 +1036,34 @@ impl EditorView {
             KeymapResult::NotFound | KeymapResult::Cancelled(_) => return Some(key_result),
         }
         None
+    }
+
+    fn file_tree_key(
+        &mut self,
+        context: &mut crate::compositor::Context,
+        key: KeyEvent,
+    ) -> EventResult {
+        let mut cx = commands::Context {
+            editor: context.editor,
+            count: None,
+            register: None,
+            callback: Vec::new(),
+            on_next_key_callback: None,
+            jobs: context.jobs,
+        };
+        let _ = self.handle_keymap_event(Mode::FileTree, &mut cx, key);
+        let callbacks = take(&mut cx.callback);
+        let callback = if callbacks.is_empty() {
+            None
+        } else {
+            let callback: crate::compositor::Callback = Box::new(move |compositor, cx| {
+                for callback in callbacks {
+                    callback(&mut *compositor, &mut *cx);
+                }
+            });
+            Some(callback)
+        };
+        EventResult::Consumed(callback)
     }
 
     fn insert_mode(&mut self, cx: &mut commands::Context, event: KeyEvent) {
@@ -1451,6 +1537,19 @@ impl Component for EditorView {
         event: &Event,
         context: &mut crate::compositor::Context,
     ) -> EventResult {
+        if let EventResult::Consumed(callback) = self.file_tree.handle_event(event, context) {
+            return EventResult::Consumed(callback);
+        }
+        if self.file_tree.focused() {
+            if let Event::Key(key) = event {
+                let mut key = *key;
+                context.editor.reset_idle_timer();
+                canonicalize_key(&mut key);
+                context.editor.status_msg = None;
+                return self.file_tree_key(context, key);
+            }
+        }
+
         let mut cx = commands::Context {
             editor: context.editor,
             count: None,
@@ -1632,6 +1731,7 @@ impl Component for EditorView {
         if use_bufferline {
             editor_area = editor_area.clip_top(1);
         }
+        let (editor_area, file_tree_area) = self.file_tree.layout(editor_area);
 
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
@@ -1642,10 +1742,24 @@ impl Component for EditorView {
 
         for (view, is_focused) in cx.editor.tree.views() {
             let doc = cx.editor.document(view.doc).unwrap();
-            self.render_view(cx.editor, doc, view, area, surface, is_focused);
+            self.render_view(
+                cx.editor,
+                doc,
+                view,
+                editor_area,
+                surface,
+                is_focused && !self.file_tree.focused(),
+            );
         }
 
-        if config.auto_info {
+        if let Some(file_tree_area) = file_tree_area {
+            self.file_tree.render(file_tree_area, surface, cx.editor);
+        }
+
+        let context_menu_visible = self.context_menu_started_at.is_some_and(|started| {
+            super::context_menu_visible(self.keymaps.pending().len(), started.elapsed(), &config)
+        });
+        if config.auto_info && context_menu_visible {
             if let Some(mut info) = cx.editor.autoinfo.take() {
                 info.render(area, surface, cx);
                 cx.editor.autoinfo = Some(info)
@@ -1734,6 +1848,9 @@ impl Component for EditorView {
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        if self.file_tree.focused() {
+            return (None, CursorKind::Hidden);
+        }
         match editor.cursor() {
             // all block cursors are drawn manually
             (pos, CursorKind::Block) => {

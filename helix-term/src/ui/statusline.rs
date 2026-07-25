@@ -171,7 +171,7 @@ where
     let mode_str = match context.editor.mode() {
         Mode::Insert => &modenames.insert,
         Mode::Select => &modenames.select,
-        Mode::Normal => &modenames.normal,
+        Mode::Normal | Mode::FileTree => &modenames.normal,
     };
     let content = if visible {
         format!(" {mode_str} ")
@@ -183,7 +183,7 @@ where
         match context.editor.mode() {
             Mode::Insert => context.editor.theme.get("ui.statusline.insert"),
             Mode::Select => context.editor.theme.get("ui.statusline.select"),
-            Mode::Normal => context.editor.theme.get("ui.statusline.normal"),
+            Mode::Normal | Mode::FileTree => context.editor.theme.get("ui.statusline.normal"),
         }
     } else {
         Style::default()
@@ -468,7 +468,7 @@ where
         match context.editor.mode() {
             Mode::Insert => Some(context.editor.theme.get("ui.statusline.insert")),
             Mode::Select => Some(context.editor.theme.get("ui.statusline.select")),
-            Mode::Normal => Some(context.editor.theme.get("ui.statusline.normal")),
+            Mode::Normal | Mode::FileTree => Some(context.editor.theme.get("ui.statusline.normal")),
         }
     } else {
         None

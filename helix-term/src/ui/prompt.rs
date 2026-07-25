@@ -6,7 +6,7 @@ use helix_view::document::Mode;
 use helix_view::input::KeyEvent;
 use helix_view::keyboard::KeyCode;
 use std::sync::Arc;
-use std::{borrow::Cow, ops::RangeFrom};
+use std::{borrow::Cow, ops::RangeFrom, time::Instant};
 use tui::buffer::Buffer as Surface;
 use tui::text::Span;
 use tui::widgets::{Block, Widget};
@@ -47,6 +47,7 @@ pub struct Prompt {
     pub doc_fn: DocFn,
     next_char_handler: Option<PromptCharHandler>,
     language: Option<(&'static str, Arc<ArcSwap<syntax::Loader>>)>,
+    context_menu_started_at: Instant,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,7 @@ impl Prompt {
             doc_fn: Box::new(|_| None),
             next_char_handler: None,
             language: None,
+            context_menu_started_at: Instant::now(),
         }
     }
 
@@ -157,6 +159,12 @@ impl Prompt {
     pub fn recalculate_completion(&mut self, editor: &Editor) {
         self.exit_selection();
         self.completion = (self.completion_fn)(editor, &self.line);
+        self.context_menu_started_at = Instant::now();
+        let timeout = editor.config().context_menu_timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            helix_event::request_redraw();
+        });
     }
 
     /// Compute the cursor position after applying movement
@@ -432,8 +440,13 @@ impl Prompt {
             area.width,
             height,
         );
+        let context_menu_visible = ui::context_menu_visible(
+            self.line.chars().count(),
+            self.context_menu_started_at.elapsed(),
+            &cx.editor.config(),
+        );
 
-        if completion_area.height > 0 && !self.completion.is_empty() {
+        if context_menu_visible && completion_area.height > 0 && !self.completion.is_empty() {
             let area = completion_area;
             let background = theme.get("ui.menu");
 
@@ -476,38 +489,40 @@ impl Prompt {
             }
         }
 
-        if let Some(doc) = (self.doc_fn)(&self.line) {
-            let mut text = ui::Text::new(doc.to_string());
+        if context_menu_visible {
+            if let Some(doc) = (self.doc_fn)(&self.line) {
+                let mut text = ui::Text::new(doc.to_string());
 
-            let max_width = BASE_WIDTH * 3;
-            let horizontal_padding = 2; // border + margin
-            let vertical_padding = 1; // border only
-            let text_width = max_width - horizontal_padding * 2;
+                let max_width = BASE_WIDTH * 3;
+                let horizontal_padding = 2; // border + margin
+                let vertical_padding = 1; // border only
+                let text_width = max_width - horizontal_padding * 2;
 
-            let viewport = area;
+                let viewport = area;
 
-            let (_width, height) = ui::text::required_size(&text.contents, text_width);
+                let (_width, height) = ui::text::required_size(&text.contents, text_width);
 
-            let area = viewport.intersection(Rect::new(
-                completion_area.x,
-                completion_area
-                    .y
-                    .saturating_sub(height + vertical_padding * 2),
-                max_width,
-                height + vertical_padding * 2,
-            ));
+                let area = viewport.intersection(Rect::new(
+                    completion_area.x,
+                    completion_area
+                        .y
+                        .saturating_sub(height + vertical_padding * 2),
+                    max_width,
+                    height + vertical_padding * 2,
+                ));
 
-            let background = theme.get("ui.help");
-            surface.clear_with(area, background);
+                let background = theme.get("ui.help");
+                surface.clear_with(area, background);
 
-            let block = Block::bordered()
-                // .title(self.title.as_str())
-                .border_style(background);
+                let block = Block::bordered()
+                    // .title(self.title.as_str())
+                    .border_style(background);
 
-            let inner = block.inner(area).inner(Margin::horizontal(1));
+                let inner = block.inner(area).inner(Margin::horizontal(1));
 
-            block.render(area, surface);
-            text.render(inner, surface, cx);
+                block.render(area, surface);
+                text.render(inner, surface, cx);
+            }
         }
 
         let line = area.height - 1;

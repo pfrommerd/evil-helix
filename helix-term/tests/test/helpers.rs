@@ -70,8 +70,6 @@ pub struct TestCase {
     pub in_keys: String,
     pub out_text: String,
     pub out_selection: Selection,
-
-    pub line_feed_handling: LineFeedHandling,
 }
 
 impl<S, R, V> From<(S, R, V)> for TestCase
@@ -101,7 +99,6 @@ where
             in_keys: keys.into(),
             out_text,
             out_selection,
-            line_feed_handling,
         }
     }
 }

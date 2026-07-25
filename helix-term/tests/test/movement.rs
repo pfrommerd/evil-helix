@@ -8,7 +8,6 @@ async fn insert_mode_cursor_position() -> anyhow::Result<()> {
         in_keys: "i".into(),
         out_text: String::new(),
         out_selection: Selection::single(0, 0),
-        line_feed_handling: LineFeedHandling::AsIs,
     })
     .await?;
 

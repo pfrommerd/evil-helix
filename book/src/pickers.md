@@ -13,3 +13,8 @@ You can insert the contents of a [register](./registers.md) using `Ctrl-r` follo
 ### File explorer
 
 `Space-e` opens an interactive file explorer for browsing and opening files, rooted at the workspace; `Space-.` opens one rooted at the current buffer's directory. Unlike the file picker, the explorer does not ignore most files by default; its ignore behaviour is configured separately in the [`[editor.file-explorer]`](./editor.md#editorfile-explorer-section) section.
+
+For persistent navigation, `Space-t` focuses or defocuses a right-side file tree, showing it if
+hidden, and `Space-T` toggles its visibility. Tree navigation does not open files; press `Enter`
+to open the selected file. The tree supports marked multi-selection, file operations, git state, diagnostics, and
+automatic refresh independently of both modal pickers.

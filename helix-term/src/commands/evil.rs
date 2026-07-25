@@ -327,6 +327,9 @@ impl EvilCommands {
             helix_view::document::Mode::Insert => {
                 log::debug!("Attempted to select while in insert mode");
             }
+            helix_view::document::Mode::FileTree => {
+                log::debug!("Attempted to select while the file-tree keymap is active");
+            }
         }
 
         return selection;
@@ -599,46 +602,6 @@ impl EvilCommands {
             );
             // TODO: textobject_paragraph() selects the last newline,
             // which causes a different behavior compared to vim
-        }));
-    }
-
-    fn get_treesitter_object_selection(cx: &mut Context, object: &str) -> Option<Selection> {
-        let (view, doc) = current!(cx.editor);
-        let text = doc.text().slice(..);
-        let loader = cx.editor.syn_loader.load();
-        // TODO: implement TryInto instead
-        let ts_modifier = match Self::context().modifier.as_ref() {
-            Some(m) if m == &Modifier::Inside => textobject::TextObject::Inside,
-            Some(m) if m == &Modifier::Around => textobject::TextObject::Around,
-            Some(m) => {
-                log::error!(
-                    "Got an evil text object with an unexpected evil modifier: {:?}",
-                    m
-                );
-                return None;
-            }
-            None => {
-                log::error!("Got an evil text object but no evil modifier");
-                return None;
-            }
-        };
-
-        // See also: select_textobject() in commands.rs
-
-        return Some(doc.selection(view.id).clone().transform(|range| {
-            let Some(syntax) = doc.syntax() else {
-                return range;
-            };
-
-            return textobject::textobject_treesitter(
-                text,
-                range,
-                ts_modifier,
-                object,
-                syntax,
-                &loader,
-                Self::context().count.unwrap_or(1),
-            );
         }));
     }
 

@@ -266,6 +266,86 @@ impl Default for FileExplorerConfig {
     }
 }
 
+/// Configuration for the persistent file-tree panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct FileTreeConfig {
+    /// Show the tree when Helix starts.
+    pub visible: bool,
+    /// Initial panel width in terminal columns.
+    pub width: u16,
+    /// Smallest interactive panel width.
+    pub min_width: u16,
+    /// Largest interactive panel width.
+    pub max_width: u16,
+    /// Number of columns added or removed by resize commands.
+    pub width_step: u16,
+    /// Hide hidden files.
+    pub hidden: bool,
+    /// Follow symbolic links while browsing.
+    pub follow_symlinks: bool,
+    /// Honor `.ignore` files.
+    pub ignore: bool,
+    /// Read ignore files from parent directories.
+    pub parents: bool,
+    /// Honor `.gitignore` files.
+    pub git_ignore: bool,
+    /// Honor the global git ignore file.
+    pub git_global: bool,
+    /// Honor `.git/info/exclude`.
+    pub git_exclude: bool,
+    /// Fold chains of single-child directories.
+    pub flatten_dirs: bool,
+    /// Reveal the current document when the tree gains focus.
+    pub auto_reveal: bool,
+    /// Show version-control state.
+    pub git_status: bool,
+    /// Show language-server diagnostics.
+    pub diagnostics: bool,
+}
+
+impl Default for FileTreeConfig {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            width: 32,
+            min_width: 20,
+            max_width: 80,
+            width_step: 4,
+            hidden: false,
+            follow_symlinks: false,
+            ignore: false,
+            parents: false,
+            git_ignore: false,
+            git_global: false,
+            git_exclude: false,
+            flatten_dirs: true,
+            auto_reveal: true,
+            git_status: true,
+            diagnostics: true,
+        }
+    }
+}
+
+/// Configuration for external filesystem notifications.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct FileWatcherConfig {
+    pub enable: bool,
+    pub auto_reload: bool,
+    pub debounce_timeout: u64,
+}
+
+impl Default for FileWatcherConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            auto_reload: true,
+            debounce_timeout: 100,
+        }
+    }
+}
+
 fn serialize_alphabet<S>(alphabet: &[char], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -366,8 +446,20 @@ pub struct Config {
     pub continue_comments: bool,
     /// Whether to display infoboxes. Defaults to true.
     pub auto_info: bool,
+    /// Show context and prompt-completion menus after more than this many characters.
+    /// Defaults to 1.
+    pub context_menu_trigger_len: usize,
+    /// Show context and prompt-completion menus after this delay even if the character
+    /// threshold has not been exceeded. Defaults to 5000ms.
+    #[serde(
+        serialize_with = "serialize_duration_millis",
+        deserialize_with = "deserialize_duration_millis"
+    )]
+    pub context_menu_timeout: Duration,
     pub file_picker: FilePickerConfig,
     pub file_explorer: FileExplorerConfig,
+    pub file_tree: FileTreeConfig,
+    pub file_watcher: FileWatcherConfig,
     /// Configuration of the statusline elements
     pub statusline: StatusLineConfig,
     /// Shape for cursor in each mode
@@ -1260,8 +1352,12 @@ impl Default for Config {
             preview_completion_insert: true,
             completion_trigger_len: 2,
             auto_info: true,
+            context_menu_trigger_len: 1,
+            context_menu_timeout: Duration::from_secs(5),
             file_picker: FilePickerConfig::default(),
             file_explorer: FileExplorerConfig::default(),
+            file_tree: FileTreeConfig::default(),
+            file_watcher: FileWatcherConfig::default(),
             statusline: StatusLineConfig::default(),
             cursor_shape: CursorShapeConfig::default(),
             true_color: false,
@@ -1499,6 +1595,25 @@ pub enum CloseError {
 }
 
 impl Editor {
+    /// Aggregate workspace diagnostics by source path for non-editor UI such as the file tree.
+    pub fn workspace_diagnostic_counts(&self) -> HashMap<PathBuf, (usize, usize)> {
+        let mut counts = HashMap::new();
+        for (uri, diagnostics) in &self.diagnostics {
+            let Some(path) = uri.as_path() else {
+                continue;
+            };
+            let entry = counts.entry(path.to_path_buf()).or_insert((0, 0));
+            for (diagnostic, _) in diagnostics {
+                match diagnostic.severity {
+                    Some(lsp::DiagnosticSeverity::ERROR) => entry.0 += 1,
+                    Some(lsp::DiagnosticSeverity::WARNING) => entry.1 += 1,
+                    _ => {}
+                }
+            }
+        }
+        counts
+    }
+
     pub fn new(
         mut area: Rect,
         theme_loader: Arc<theme::Loader>,

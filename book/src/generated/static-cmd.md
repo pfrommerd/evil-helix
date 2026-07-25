@@ -116,6 +116,33 @@
 | `file_explorer` | Open file explorer in workspace root | normal: `` <space>e ``, select: `` <space>e `` |
 | `file_explorer_in_current_buffer_directory` | Open file explorer at current buffer's directory | normal: `` <space>. ``, select: `` <space>. `` |
 | `file_explorer_in_current_directory` | Open file explorer at current working directory |  |
+| `file_tree_toggle` | Toggle persistent file-tree visibility | normal: `` <space>T ``, select: `` <space>T ``, file-tree: `` <space>T `` |
+| `file_tree_focus` | Focus or defocus the persistent file tree | normal: `` <space>t ``, select: `` <space>t ``, file-tree: `` <space>t `` |
+| `file_tree_focus_editor` | Return focus from the file tree to the editor | file-tree: `` esc `` |
+| `file_tree_refresh` | Refresh the persistent file tree | file-tree: `` R `` |
+| `file_tree_collapse_all` | Collapse all directories in the persistent file tree | file-tree: `` z `` |
+| `file_tree_width_increase` | Increase the persistent file tree width | file-tree: `` + `` |
+| `file_tree_width_decrease` | Decrease the persistent file tree width | file-tree: `` - `` |
+| `file_tree_cursor_up` | Move the file-tree cursor up | file-tree: `` k ``, `` up `` |
+| `file_tree_cursor_down` | Move the file-tree cursor down | file-tree: `` j ``, `` down `` |
+| `file_tree_page_up` | Move the file-tree cursor up half a page | file-tree: `` C-u ``, `` pageup `` |
+| `file_tree_page_down` | Move the file-tree cursor down half a page | file-tree: `` C-d ``, `` pagedown `` |
+| `file_tree_cursor_first` | Move to the first file-tree entry | file-tree: `` home `` |
+| `file_tree_cursor_last` | Move to the last file-tree entry | file-tree: `` end `` |
+| `file_tree_collapse` | Collapse a directory or select its parent | file-tree: `` h ``, `` left `` |
+| `file_tree_expand` | Expand the selected directory | file-tree: `` l ``, `` right `` |
+| `file_tree_open` | Open the selected file | file-tree: `` ret `` |
+| `file_tree_open_hsplit` | Open the selected file in a horizontal split | file-tree: `` C-s `` |
+| `file_tree_open_vsplit` | Open the selected file in a vertical split | file-tree: `` C-v `` |
+| `file_tree_mark` | Mark or unmark the selected file-tree entry | file-tree: `` w `` |
+| `file_tree_copy` | Copy marked file-tree entries | file-tree: `` y `` |
+| `file_tree_cut` | Cut marked file-tree entries | file-tree: `` x `` |
+| `file_tree_paste` | Paste file-tree entries | file-tree: `` p `` |
+| `file_tree_create_file` | Create a file from the file tree | file-tree: `` a `` |
+| `file_tree_create_directory` | Create a directory from the file tree | file-tree: `` A `` |
+| `file_tree_rename` | Rename the selected file-tree entry | file-tree: `` r `` |
+| `file_tree_delete` | Delete marked file-tree entries | file-tree: `` d `` |
+| `file_tree_toggle_hidden` | Toggle hidden entries in the file tree | file-tree: `` . `` |
 | `code_action` | Perform code action | normal: `` <space>a ``, select: `` <space>a `` |
 | `buffer_picker` | Open buffer picker | normal: `` <space>b ``, select: `` <space>b `` |
 | `jumplist_picker` | Open jumplist picker | normal: `` <space>j ``, select: `` <space>j `` |

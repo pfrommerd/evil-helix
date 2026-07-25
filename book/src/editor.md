@@ -7,6 +7,8 @@
 - [`[editor.cursor-shape]` Section](#editorcursor-shape-section)
 - [`[editor.file-picker]` Section](#editorfile-picker-section)
 - [`[editor.file-explorer]` Section](#editorfile-explorer-section)
+- [`[editor.file-tree]` Section](#editorfile-tree-section)
+- [`[editor.file-watcher]` Section](#editorfile-watcher-section)
 - [`[editor.buffer-picker]` Section](#editorbuffer-picker-section)
 - [`[editor.auto-pairs]` Section](#editorauto-pairs-section)
 - [`[editor.auto-save]` Section](#editorauto-save-section)
@@ -50,6 +52,8 @@
 | `completion-trigger-len` | The min-length of word under cursor to trigger autocompletion | `2` |
 | `completion-replace` | Whether to make completions always replace the entire word and not just the part before the cursor | `false` |
 | `auto-info` | Whether to display info boxes | `true` |
+| `context-menu-trigger-len` | Show key-context and prompt-completion menus after more than this many typed characters | `1` |
+| `context-menu-timeout` | Time in milliseconds before key-context and prompt-completion menus are shown regardless of typed length | `5000` |
 | `true-color` | Whether to override automatic detection of terminal truecolor support in the event of a false negative | `false` |
 | `undercurl` | Whether to override automatic detection of terminal undercurl support in the event of a false negative | `false` |
 | `rulers` | List of column positions at which to display the rulers. Can be overridden by language specific `rulers` in `languages.toml` file | `[]` |
@@ -250,6 +254,58 @@ Note that the ignore files consulted by the file explorer when `ignore` is set t
 |`git-global` | Enables reading global `.gitignore`, whose path is specified in git's config: `core.excludesfile` option | `false`
 |`git-exclude` | Enables reading `.git/info/exclude` files | `false`
 |`flatten-dirs` | Enables flattening single child directories | `true`
+
+### `[editor.file-tree]` Section
+
+The file tree is a persistent panel on the right side of the editor. It is separate from the
+file picker and modal file explorer. `Space-t` focuses or defocuses it, showing it first if
+needed. `Space-T` toggles its visibility.
+
+| Key | Description | Default |
+|--|--|---------|
+| `visible` | Show the panel at startup | `false` |
+| `width` | Initial width in terminal columns | `32` |
+| `min-width` | Minimum width used by resize commands | `20` |
+| `max-width` | Maximum width used by resize commands | `80` |
+| `width-step` | Columns added or removed by each resize command | `4` |
+| `hidden` | Ignore hidden files | `false` |
+| `follow-symlinks` | Follow symlinked directories while browsing | `false` |
+| `ignore` | Read `.ignore` files | `false` |
+| `parents` | Read ignore files from parent directories | `false` |
+| `git-ignore` | Read `.gitignore` files | `false` |
+| `git-global` | Read the global git ignore file | `false` |
+| `git-exclude` | Read `.git/info/exclude` | `false` |
+| `flatten-dirs` | Fold chains of single-child directories into one row | `true` |
+| `auto-reveal` | Reveal the active document when the tree gains focus | `true` |
+| `git-status` | Show and propagate version-control state | `true` |
+| `diagnostics` | Show and propagate error and warning counts | `true` |
+
+While focused, use `hjkl` or the arrow keys to move the tree selection without opening files.
+`Enter` opens the selected file, `Ctrl-s` opens it in a horizontal split, `Ctrl-v` opens it in a
+vertical split, and `Escape` returns focus to the editor. `w` marks entries. File operations
+are `y` (copy), `x` (cut), `p` (paste), `a`/`A` (new
+file/directory), `r` (rename), and `d` (permanent delete with confirmation). `R` refreshes, `z`
+collapses all directories, `.` toggles hidden files, and `+`/`-` resize the panel.
+
+All focused-tree bindings use the standard `[keys.file-tree]` keymap and can be overridden like
+other modes:
+
+```toml
+[keys.file-tree]
+w = "no_op"
+m = "file_tree_mark"
+```
+
+### `[editor.file-watcher]` Section
+
+Helix uses native filesystem notifications to keep the tree current and reload unmodified open
+buffers after external changes. Modified buffers are never overwritten automatically.
+
+| Key | Description | Default |
+|--|--|---------|
+| `enable` | Enable native filesystem notifications | `true` |
+| `auto-reload` | Reload clean open buffers whose disk contents change | `true` |
+| `debounce-timeout` | Time in milliseconds used to coalesce filesystem events | `100` |
 
 ### `[editor.buffer-picker]` Section
 

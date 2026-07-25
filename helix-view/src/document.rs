@@ -67,6 +67,7 @@ pub enum Mode {
     Normal = 0,
     Select = 1,
     Insert = 2,
+    FileTree = 3,
 }
 
 impl Display for Mode {
@@ -75,6 +76,7 @@ impl Display for Mode {
             Mode::Normal => f.write_str("normal"),
             Mode::Select => f.write_str("select"),
             Mode::Insert => f.write_str("insert"),
+            Mode::FileTree => f.write_str("file-tree"),
         }
     }
 }
@@ -87,6 +89,7 @@ impl FromStr for Mode {
             "normal" => Ok(Mode::Normal),
             "select" => Ok(Mode::Select),
             "insert" => Ok(Mode::Insert),
+            "file-tree" => Ok(Mode::FileTree),
             _ => bail!("Invalid mode '{}'", s),
         }
     }
@@ -1332,6 +1335,19 @@ impl Document {
         Ok(())
     }
 
+    /// Returns whether the source file's decoded contents differ from this buffer.
+    ///
+    /// This is used by filesystem notifications to discard duplicate/self-write events before
+    /// creating a reload transaction.
+    pub fn differs_from_disk(&self) -> Result<bool, Error> {
+        let Some(path) = self.path() else {
+            return Ok(false);
+        };
+        let mut file = std::fs::File::open(path)?;
+        let (rope, ..) = from_reader(&mut file, Some(self.encoding))?;
+        Ok(&rope != self.text())
+    }
+
     /// Sets the [`Document`]'s encoding with the encoding correspondent to `label`.
     pub fn set_encoding(&mut self, label: &str) -> Result<(), Error> {
         let encoding =
@@ -2558,6 +2574,25 @@ mod test {
     use arc_swap::ArcSwap;
 
     use super::*;
+
+    #[test]
+    fn detects_external_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("watched.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let doc = Document::open(
+            &path,
+            None,
+            false,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        )
+        .unwrap();
+
+        assert!(!doc.differs_from_disk().unwrap());
+        std::fs::write(path, "after\n").unwrap();
+        assert!(doc.differs_from_disk().unwrap());
+    }
 
     #[test]
     fn changeset_to_changes_ignore_line_endings() {

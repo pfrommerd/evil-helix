@@ -23,6 +23,7 @@ use crate::{
     args::Args,
     compositor::{Compositor, Event},
     config::Config,
+    file_watcher::{FileEventBatch, FileWatcher},
     handlers,
     job::Jobs,
     keymap::Keymaps,
@@ -31,8 +32,9 @@ use crate::{
 
 use log::{debug, error, info, warn};
 use std::{
+    collections::HashSet,
     io::{stdin, IsTerminal},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -77,6 +79,9 @@ pub struct Application {
     signals: Signals,
     jobs: Jobs,
     lsp_progress: LspProgressMap,
+    file_watcher: Option<FileWatcher>,
+    deferred_file_events: HashSet<PathBuf>,
+    deferred_file_rescan: bool,
 
     theme_mode: Option<theme::Mode>,
 }
@@ -136,7 +141,7 @@ impl Application {
         let keys = Box::new(Map::new(Arc::clone(&config), |config: &Config| {
             &config.keys
         }));
-        let editor_view = Box::new(ui::EditorView::new(Keymaps::new(keys)));
+        let editor_view = Box::new(ui::EditorView::new(Keymaps::new(keys), &editor));
         compositor.push(editor_view);
 
         let jobs = Jobs::new();
@@ -244,6 +249,21 @@ impl Application {
         ])
         .context("build signal handler")?;
 
+        #[cfg(not(feature = "integration"))]
+        let file_watcher = if editor.config().file_watcher.enable {
+            match FileWatcher::new(&editor) {
+                Ok(watcher) => Some(watcher),
+                Err(err) => {
+                    editor.set_warning(format!("Could not start filesystem watcher: {err}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(feature = "integration")]
+        let file_watcher = None;
+
         let app = Self {
             compositor,
             terminal,
@@ -252,6 +272,9 @@ impl Application {
             signals,
             jobs,
             lsp_progress: LspProgressMap::new(),
+            file_watcher,
+            deferred_file_events: HashSet::new(),
+            deferred_file_rescan: false,
             theme_mode,
         };
 
@@ -349,6 +372,17 @@ impl Application {
                     }
                     self.render().await;
                 }
+                batch = async {
+                    match self.file_watcher.as_mut() {
+                        Some(watcher) => watcher.recv().await,
+                        None => futures_util::future::pending().await,
+                    }
+                } => {
+                    if let Some(batch) = batch {
+                        self.handle_file_events(batch);
+                        self.render().await;
+                    }
+                }
                 event = self.editor.wait_event() => {
                     let _idle_handled = self.handle_editor_event(event).await;
 
@@ -365,6 +399,21 @@ impl Application {
                 }
             }
 
+            if self.editor.write_count == 0
+                && (!self.deferred_file_events.is_empty() || self.deferred_file_rescan)
+            {
+                let paths = std::mem::take(&mut self.deferred_file_events);
+                let rescan = std::mem::take(&mut self.deferred_file_rescan);
+                self.handle_file_events(FileEventBatch { paths, rescan });
+                self.render().await;
+            }
+            if let Some(watcher) = self.file_watcher.as_mut() {
+                if let Err(err) = watcher.reconcile(&self.editor) {
+                    self.editor
+                        .set_warning(format!("Could not update filesystem watches: {err}"));
+                }
+            }
+
             // for integration tests only, reset the idle timer after every
             // event to signal when test events are done processing
             #[cfg(feature = "integration")]
@@ -374,8 +423,148 @@ impl Application {
         }
     }
 
+    fn handle_file_events(&mut self, batch: FileEventBatch) {
+        if self.editor.write_count > 0 {
+            self.deferred_file_events.extend(batch.paths);
+            self.deferred_file_rescan |= batch.rescan;
+            return;
+        }
+
+        if let Some(editor_view) = self.compositor.find::<ui::EditorView>() {
+            editor_view.refresh_file_tree(&self.editor);
+        }
+        self.editor.needs_redraw = true;
+
+        if !self.editor.config().file_watcher.auto_reload {
+            return;
+        }
+
+        let doc_ids: Vec<_> = self
+            .editor
+            .documents()
+            .filter_map(|doc| {
+                let path = doc.path()?;
+                let changed = batch.rescan
+                    || batch.paths.iter().any(|event_path| {
+                        event_path == path
+                            || event_path
+                                .canonicalize()
+                                .is_ok_and(|canonical| canonical == path)
+                    });
+                changed.then_some(doc.id())
+            })
+            .collect();
+
+        for doc_id in doc_ids {
+            let (path, modified, exists, differs) = {
+                let doc = self.editor.document(doc_id).unwrap();
+                let path = doc.path().unwrap().to_path_buf();
+                (
+                    path.clone(),
+                    doc.is_modified(),
+                    path.exists(),
+                    doc.differs_from_disk(),
+                )
+            };
+            if !exists {
+                self.editor
+                    .set_warning(format!("File was removed externally: {}", path.display()));
+                continue;
+            }
+            if modified {
+                match differs {
+                    Ok(false) => self
+                        .editor
+                        .document_mut(doc_id)
+                        .unwrap()
+                        .pickup_last_saved_time(),
+                    Ok(true) => self.editor.set_warning(format!(
+                        "File changed externally while buffer has edits: {}",
+                        path.display()
+                    )),
+                    Err(err) => self.editor.set_warning(format!(
+                        "Could not check changed file {}: {err}",
+                        path.display()
+                    )),
+                }
+                continue;
+            }
+            match differs {
+                Ok(false) => {
+                    self.editor
+                        .document_mut(doc_id)
+                        .unwrap()
+                        .pickup_last_saved_time();
+                    continue;
+                }
+                Err(err) => {
+                    self.editor.set_warning(format!(
+                        "Could not check changed file {}: {err}",
+                        path.display()
+                    ));
+                    continue;
+                }
+                Ok(true) => {}
+            }
+
+            let view_id = self.editor.tree.focus;
+            let mut view_ids: Vec<_> = self
+                .editor
+                .document(doc_id)
+                .unwrap()
+                .selections()
+                .keys()
+                .copied()
+                .collect();
+            if view_ids.is_empty() {
+                self.editor
+                    .document_mut(doc_id)
+                    .unwrap()
+                    .ensure_view_init(view_id);
+                view_ids.push(view_id);
+            }
+            let reload_view_id = view_ids[0];
+            let trust_full = {
+                let doc = self.editor.document(doc_id).unwrap();
+                self.editor
+                    .workspace_trust
+                    .query(
+                        doc.workspace_root(),
+                        helix_loader::workspace_trust::TrustQuery::Git,
+                    )
+                    .is_trusted()
+            };
+            let providers = self.editor.diff_providers.clone();
+            let result = {
+                let doc = doc_mut!(self.editor, &doc_id);
+                let view = view_mut!(self.editor, reload_view_id);
+                view.sync_changes(doc);
+                doc.reload(view, &providers, trust_full)
+            };
+            if let Err(err) = result {
+                self.editor
+                    .set_warning(format!("Could not reload {}: {err}", path.display()));
+                continue;
+            }
+            let scrolloff = self.editor.config().scrolloff;
+            for view_id in view_ids {
+                let doc = doc_mut!(self.editor, &doc_id);
+                let view = view_mut!(self.editor, view_id);
+                if view.doc == doc_id {
+                    view.sync_changes(doc);
+                    view.ensure_cursor_in_view(doc, scrolloff);
+                }
+            }
+            self.editor
+                .language_servers
+                .file_event_handler
+                .file_changed(path);
+        }
+    }
+
     pub fn handle_config_events(&mut self, config_event: ConfigEvent) {
         let old_editor_config = self.editor.config();
+        let old_file_watcher_config = old_editor_config.file_watcher.clone();
 
         match config_event {
             ConfigEvent::Refresh => self.refresh_config(),
@@ -405,6 +594,22 @@ impl Application {
         // Update all the relevant members in the editor after updating
         // the configuration.
         self.editor.refresh_config(&old_editor_config);
+
+        if old_file_watcher_config != self.editor.config().file_watcher {
+            self.file_watcher = None;
+        }
+        if !cfg!(feature = "integration") && self.editor.config().file_watcher.enable {
+            if self.file_watcher.is_none() {
+                match FileWatcher::new(&self.editor) {
+                    Ok(watcher) => self.file_watcher = Some(watcher),
+                    Err(err) => self
+                        .editor
+                        .set_warning(format!("Could not start filesystem watcher: {err}")),
+                }
+            }
+        } else {
+            self.file_watcher = None;
+        }
 
         // reset view position in case softwrap was enabled/disabled
         let scrolloff = self.editor.config().scrolloff;
