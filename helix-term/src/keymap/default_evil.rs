@@ -438,6 +438,9 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "down" | "k" => file_tree_cursor_down,
         "pageup" | "C-u" => file_tree_page_up,
         "pagedown" | "C-d" => file_tree_page_down,
+        "H" => file_tree_cursor_top,
+        "M" => file_tree_cursor_middle,
+        "L" => file_tree_cursor_bottom,
         "home" => file_tree_cursor_first,
         "end" => file_tree_cursor_last,
         "left" | "j" => file_tree_collapse,
@@ -540,6 +543,13 @@ mod tests {
             ("s", "change_selection"),
         ] {
             assert_command(&keymaps, Mode::Normal, &[key], command);
+        }
+        for (key, command) in [
+            ("H", "file_tree_cursor_top"),
+            ("M", "file_tree_cursor_middle"),
+            ("L", "file_tree_cursor_bottom"),
+        ] {
+            assert_command(&keymaps, Mode::FileTree, &[key], command);
         }
         assert_command(&keymaps, Mode::Insert, &["C-c"], "normal_mode");
 

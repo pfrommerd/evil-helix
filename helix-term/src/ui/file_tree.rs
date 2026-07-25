@@ -48,6 +48,9 @@ pub enum FileTreeAction {
     CursorDown,
     PageUp,
     PageDown,
+    CursorTop,
+    CursorMiddle,
+    CursorBottom,
     CursorFirst,
     CursorLast,
     Collapse,
@@ -418,6 +421,22 @@ impl FileTree {
             .cursor
             .saturating_add_signed(delta)
             .min(self.rows.len() - 1);
+        self.clamp_cursor();
+    }
+
+    fn move_cursor_to_visible_row(&mut self, position: VisiblePosition) {
+        if self.rows.is_empty() {
+            return;
+        }
+
+        let first = self.scroll.min(self.rows.len() - 1);
+        let visible_len = self.last_height.min(self.rows.len() - first).max(1);
+        let offset = match position {
+            VisiblePosition::Top => 0,
+            VisiblePosition::Middle => (visible_len - 1) / 2,
+            VisiblePosition::Bottom => visible_len - 1,
+        };
+        self.cursor = first + offset;
         self.clamp_cursor();
     }
 
@@ -803,6 +822,13 @@ impl FileTree {
             FileTreeAction::PageDown => {
                 self.move_cursor((self.last_height as isize / 2).max(1));
             }
+            FileTreeAction::CursorTop => self.move_cursor_to_visible_row(VisiblePosition::Top),
+            FileTreeAction::CursorMiddle => {
+                self.move_cursor_to_visible_row(VisiblePosition::Middle);
+            }
+            FileTreeAction::CursorBottom => {
+                self.move_cursor_to_visible_row(VisiblePosition::Bottom);
+            }
             FileTreeAction::CursorFirst => {
                 self.cursor = 0;
                 self.clamp_cursor();
@@ -969,6 +995,13 @@ fn ordered_width_bounds(a: u16, b: u16) -> (u16, u16) {
     (a.min(b), a.max(b))
 }
 
+#[derive(Debug, Clone, Copy)]
+enum VisiblePosition {
+    Top,
+    Middle,
+    Bottom,
+}
+
 fn aggregate_diagnostics(
     direct: HashMap<PathBuf, (usize, usize)>,
     root: &Path,
@@ -1024,6 +1057,50 @@ mod tests {
             last_area: None,
             dirty: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn add_rows(tree: &mut FileTree, count: usize) {
+        tree.rows.extend((0..count).map(|index| Row {
+            path: tree.root.join(index.to_string()),
+            name: index.to_string(),
+            depth: 0,
+            is_dir: false,
+            expansion_root: tree.root.clone(),
+        }));
+    }
+
+    #[test]
+    fn moves_cursor_to_visible_rows() {
+        let mut tree = empty_tree(PathBuf::from("/workspace"));
+        add_rows(&mut tree, 20);
+        tree.scroll = 5;
+        tree.cursor = 7;
+        tree.last_height = 6;
+
+        tree.move_cursor_to_visible_row(VisiblePosition::Top);
+        assert_eq!(tree.cursor, 5);
+        tree.move_cursor_to_visible_row(VisiblePosition::Middle);
+        assert_eq!(tree.cursor, 7);
+        tree.move_cursor_to_visible_row(VisiblePosition::Bottom);
+        assert_eq!(tree.cursor, 10);
+        assert_eq!(tree.scroll, 5);
+    }
+
+    #[test]
+    fn visible_row_motions_stop_at_end_of_tree() {
+        let mut tree = empty_tree(PathBuf::from("/workspace"));
+        add_rows(&mut tree, 8);
+        tree.scroll = 5;
+        tree.cursor = 6;
+        tree.last_height = 10;
+
+        tree.move_cursor_to_visible_row(VisiblePosition::Top);
+        assert_eq!(tree.cursor, 5);
+        tree.move_cursor_to_visible_row(VisiblePosition::Middle);
+        assert_eq!(tree.cursor, 6);
+        tree.move_cursor_to_visible_row(VisiblePosition::Bottom);
+        assert_eq!(tree.cursor, 7);
+        assert_eq!(tree.scroll, 5);
     }
 
     #[test]
