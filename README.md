@@ -2,7 +2,9 @@
 
 <h1>evil-helix</h1>
 
-A soft fork of [Helix](https://helix-editor.com) which introduces Vim keybindings and more.
+**pfrommerd's souped-up evil-helix** — a personal soft fork of
+[evil-helix](https://github.com/usagi-flow/evil-helix) with a built-in file tree,
+automatic file reloading, and opinionated keyboard-first defaults.
 
 [![Build status](https://img.shields.io/github/actions/workflow/status/usagi-flow/evil-helix/evil-build-tag.yml?style=for-the-badge&logo=github)](https://github.com/usagi-flow/evil-helix/actions/workflows/evil-build-tag.yml)
 
@@ -11,6 +13,31 @@ A soft fork of [Helix](https://helix-editor.com) which introduces Vim keybinding
 <hr />
 
 </div>
+
+## Additional features and defaults
+
+This fork includes several features and default bindings beyond evil-helix:
+
+- **Shifted navigation cluster:** normal and visual navigation uses `j`, `k`, `l`, `;` for
+  left, down, up, and right instead of `h`, `j`, `k`, `l`.
+- **Persistent file tree:** `t` or `Space-t` shows and focuses the right-side tree; `T` or
+  `Space-T` toggles its visibility. The active file is revealed and centered when the tree gains
+  focus.
+- **Fast fuzzy tree search:** `Space-q` opens the tree directly into its top-line search field.
+  Within the tree, `q` or `Space-q` toggles search focus. Results preserve their directory context,
+  flatten single-child directory chains, and use the same asynchronous file index as the regular
+  `Space-f` picker.
+- **Tree navigation and operations:** in the evil keymap, use `l`/`k` to move up/down,
+  `j`/`;` to collapse/expand, `H`/`M`/`L` for the top/middle/bottom of the view, and `g`/`G`
+  for the beginning/end of the tree. `Enter`, `Ctrl-s`, and `Ctrl-v` open files normally or in
+  splits; `.` toggles hidden files, which are hidden by default.
+- **Automatic file reload:** native filesystem watching is enabled by default. Clean buffers are
+  automatically reloaded when their files change on disk; modified buffers are never overwritten.
+- **Commands from pickers and the tree:** `:` temporarily opens the command line without closing
+  the underlying picker or losing tree/search focus, so commands such as `:q` work there too.
+
+The tree and editor bindings remain configurable through the normal Helix keymap and editor
+settings.
 
 ## Installation
 
@@ -96,7 +123,6 @@ Considering the kind and frequency of changes to this repository, it makes sense
 -	Introduce blackbox tests (cf. [#68](https://github.com/usagi-flow/evil-helix/issues/68))
 -	Introduce more Vim keybindings
 -	Implement more common/crucial features as part of the editor:
-	-	File tree (cf. [upstream PR](https://github.com/helix-editor/helix/pull/5768))
 	-	Light/dark mode support
 -	Maintain compatibility with upstream
 	-	Contribute features to upstream where possible
