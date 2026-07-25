@@ -1500,16 +1500,9 @@ impl Application {
 
     #[cfg(all(not(feature = "integration"), not(windows)))]
     pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
-        use termina::{escape::csi, Terminal as _};
+        use termina::Terminal as _;
         let reader = self.terminal.backend().terminal().event_reader();
-        termina::EventStream::new(reader, |event| {
-            // Accept either non-escape sequences or theme mode updates.
-            !event.is_escape()
-                || matches!(
-                    event,
-                    termina::Event::Csi(csi::Csi::Mode(csi::Mode::ReportTheme(_)))
-                )
-        })
+        termina::EventStream::new(reader, |_| true)
     }
 
     #[cfg(all(not(feature = "integration"), windows))]

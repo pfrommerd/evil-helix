@@ -222,7 +222,10 @@ impl TerminaBackend {
         reset_cursor_command
             .push_str(&Csi::Cursor(csi::Cursor::CursorStyle(CursorStyle::Default)).to_string());
 
-        terminal.enter_cooked_mode()?;
+        // Keep the terminal in raw mode until `claim`. Capability replies may arrive after the
+        // timeout above; briefly restoring cooked mode here would echo those replies onto the
+        // main screen before the application enters the alternate screen. They would then become
+        // visible when the application exits.
 
         // In the case of a panic, reset the terminal eagerly. If we didn't do this and instead
         // relied on `Drop`, the backtrace would be lost because it is printed before we would
