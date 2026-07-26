@@ -455,6 +455,14 @@ mod tests {
             Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_search))
         );
         assert_eq!(
+            file_tree.search(&[key!(' '), key!('f')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_picker))
+        );
+        assert_eq!(
+            file_tree.search(&[key!(' '), key!('e')]),
+            Some(&KeyTrie::MappableCommand(MappableCommand::file_explorer))
+        );
+        assert_eq!(
             file_tree.search(&[key!('q')]),
             Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_search))
         );

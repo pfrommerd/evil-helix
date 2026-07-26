@@ -283,6 +283,17 @@ pub(crate) fn file_picker_paths_with_hidden(
         })
 }
 
+fn focus_editor_after_picker_selection(cx: &mut crate::compositor::Context) {
+    cx.jobs.callback(async {
+        let callback = Callback::EditorCompositor(Box::new(|_editor, compositor| {
+            if let Some(editor_view) = compositor.find::<EditorView>() {
+                editor_view.focus_editor();
+            }
+        }));
+        Ok(callback)
+    });
+}
+
 pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     use std::time::Instant;
 
@@ -322,6 +333,7 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
             };
             cx.editor.set_error(err);
         }
+        focus_editor_after_picker_selection(cx);
     })
     .with_preview(|_editor, path| Some((path.as_path().into(), None)));
     let injector = picker.injector();
@@ -384,13 +396,16 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
                     Ok(call)
                 });
                 cx.jobs.callback(callback);
-            } else if let Err(e) = cx.editor.open(path, action) {
-                let err = if let Some(err) = e.source() {
-                    format!("{}", err)
-                } else {
-                    format!("unable to open \"{}\"", path.display())
-                };
-                cx.editor.set_error(err);
+            } else {
+                if let Err(e) = cx.editor.open(path, action) {
+                    let err = if let Some(err) = e.source() {
+                        format!("{}", err)
+                    } else {
+                        format!("unable to open \"{}\"", path.display())
+                    };
+                    cx.editor.set_error(err);
+                }
+                focus_editor_after_picker_selection(cx);
             }
         },
     )

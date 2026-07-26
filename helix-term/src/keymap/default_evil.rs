@@ -472,6 +472,8 @@ pub fn default_evil() -> HashMap<Mode, KeyTrie> {
         "t" => file_tree_focus,
         "T" => file_tree_toggle,
         "space" => { "Space"
+            "f" => file_picker,
+            "e" => file_explorer,
             "q" => file_tree_search,
             "t" => file_tree_focus,
             "T" => file_tree_toggle,
@@ -580,6 +582,8 @@ mod tests {
             &["space", "q"],
             "file_tree_search",
         );
+        assert_command(&keymaps, Mode::FileTree, &["space", "f"], "file_picker");
+        assert_command(&keymaps, Mode::FileTree, &["space", "e"], "file_explorer");
         assert_command(&keymaps, Mode::Insert, &["C-c"], "normal_mode");
 
         let KeyTrie::Sequence(commands) = binding(&keymaps, Mode::Normal, &["D"]) else {

@@ -403,21 +403,42 @@ impl FileTree {
     }
 
     fn rebuild_rows(&mut self, editor: &Editor) {
-        let selected = self.rows.get(self.cursor).map(|row| row.path.clone());
+        let selected = self.rows.get(self.cursor).cloned();
         if !self.search_prompt.line().is_empty() {
             self.rebuild_search_rows(editor.config().file_tree.flatten_dirs);
-            self.restore_selected_path(selected.as_deref(), false);
+            self.restore_selected_row(selected.as_ref(), false);
             return;
         }
         let mut rows = Vec::new();
         self.collect_rows(&self.root, 0, editor, &mut rows);
         self.rows = rows;
-        self.restore_selected_path(selected.as_deref(), false);
+        self.restore_selected_row(selected.as_ref(), false);
     }
 
     fn restore_selected_path(&mut self, selected: Option<&Path>, anchor_ancestors: bool) {
-        if let Some(index) =
-            selected.and_then(|path| self.rows.iter().position(|row| row.path == path))
+        self.restore_selected(selected, None, anchor_ancestors);
+    }
+
+    fn restore_selected_row(&mut self, selected: Option<&Row>, anchor_ancestors: bool) {
+        self.restore_selected(
+            selected.map(|row| row.path.as_path()),
+            selected.map(|row| row.expansion_root.as_path()),
+            anchor_ancestors,
+        );
+    }
+
+    fn restore_selected(
+        &mut self,
+        selected_path: Option<&Path>,
+        selected_expansion_root: Option<&Path>,
+        anchor_ancestors: bool,
+    ) {
+        if let Some(index) = selected_path
+            .and_then(|path| self.rows.iter().position(|row| row.path == path))
+            .or_else(|| {
+                selected_expansion_root
+                    .and_then(|root| self.rows.iter().position(|row| row.expansion_root == root))
+            })
         {
             self.cursor = index;
         } else {
@@ -529,9 +550,9 @@ impl FileTree {
             return;
         }
         self.search_results_dirty = false;
-        let selected = self.rows.get(self.cursor).map(|row| row.path.clone());
+        let selected = self.rows.get(self.cursor).cloned();
         self.rebuild_rows(editor);
-        self.restore_selected_path(selected.as_deref(), true);
+        self.restore_selected_row(selected.as_ref(), true);
     }
 
     fn collect_rows(&self, dir: &Path, depth: usize, editor: &Editor, out: &mut Vec<Row>) {
@@ -1998,6 +2019,39 @@ mod tests {
 
         assert_eq!(tree.cursor, 4);
         assert_eq!(tree.scroll, 3);
+    }
+
+    #[test]
+    fn restoring_flattened_directory_selection_uses_expansion_root() {
+        let root = PathBuf::from("/workspace");
+        let selected = Row {
+            path: root.join("test/foo/bar"),
+            name: "test/foo/bar".into(),
+            depth: 0,
+            is_dir: true,
+            expansion_root: root.join("test"),
+        };
+        let mut tree = empty_tree(root.clone());
+        tree.rows = vec![
+            Row {
+                path: root.join("other"),
+                name: "other".into(),
+                depth: 0,
+                is_dir: false,
+                expansion_root: root.join("other"),
+            },
+            Row {
+                path: root.join("test"),
+                name: "test".into(),
+                depth: 0,
+                is_dir: true,
+                expansion_root: root.join("test"),
+            },
+        ];
+
+        tree.restore_selected_row(Some(&selected), false);
+
+        assert_eq!(tree.cursor, 1);
     }
 
     #[test]

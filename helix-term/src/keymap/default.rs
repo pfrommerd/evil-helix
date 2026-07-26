@@ -440,6 +440,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "t" => file_tree_focus,
         "T" => file_tree_toggle,
         "space" => { "Space"
+            "f" => file_picker,
+            "e" => file_explorer,
             "q" => file_tree_search,
             "t" => file_tree_focus,
             "T" => file_tree_toggle,
