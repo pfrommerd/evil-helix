@@ -533,22 +533,12 @@ impl Application {
                 view_ids.push(view_id);
             }
             let reload_view_id = view_ids[0];
-            let trust_full = {
-                let doc = self.editor.document(doc_id).unwrap();
-                self.editor
-                    .workspace_trust
-                    .query(
-                        doc.workspace_root(),
-                        helix_loader::workspace_trust::TrustQuery::Git,
-                    )
-                    .is_trusted()
-            };
             let providers = self.editor.diff_providers.clone();
             let result = {
                 let doc = doc_mut!(self.editor, &doc_id);
                 let view = view_mut!(self.editor, reload_view_id);
                 view.sync_changes(doc);
-                doc.reload(view, &providers, trust_full)
+                doc.reload(view, &providers)
             };
             if let Err(err) = result {
                 self.editor
@@ -815,6 +805,15 @@ impl Application {
                 return;
             }
         };
+
+        // jj read queries deliberately use `--ignore-working-copy`; make saving the explicit
+        // synchronization point instead of letting unrelated UI queries snapshot the workspace.
+        if let Some(directory) = doc_save_event.path.parent() {
+            self.editor
+                .diff_providers
+                .clone()
+                .snapshot_working_copy(directory.to_owned());
+        }
 
         let doc = match self.editor.document_mut(doc_save_event.doc_id) {
             None => {

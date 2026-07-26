@@ -60,8 +60,6 @@ pub enum TrustQuery {
     Dap,
     /// Query whether `.helix/` config can be loaded
     LocalConfig,
-    /// Query whether git integration can trust the .git/config
-    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +94,8 @@ impl TrustStatus {
 pub enum ImplicitTrustLevel {
     /// Prompt for every workspace.
     None,
-    /// Helix-launched server processes (LSP and DAP) start implicitly. Workspace-local config and
-    /// git `Trust::Full` still require explicit trust.
+    /// Helix-launched server processes (LSP and DAP) start implicitly. Workspace-local config
+    /// still requires explicit trust.
     ///
     /// Default: language servers are how most people use the editor and the binaries are global
     /// (PATH-resolved, user-installed), so auto-launching them in a fresh workspace matches
@@ -780,7 +778,6 @@ mod test {
             trust.query(&trusted, TrustQuery::LocalConfig),
             TrustStatus::Trusted
         );
-        assert_eq!(trust.query(&trusted, TrustQuery::Git), TrustStatus::Trusted);
         assert!(!trust.workspace_restricted(&trusted));
 
         // A non-matching path (no `dir/*` segment match: it has a deeper component) still trusts

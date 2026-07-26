@@ -1591,12 +1591,10 @@ fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
     }
 
     let scrolloff = cx.editor.config().scrolloff;
-    let trust_full = doc_trust_full(cx.editor);
     let (view, doc) = current!(cx.editor);
-    doc.reload(view, &cx.editor.diff_providers, trust_full)
-        .map(|_| {
-            view.ensure_cursor_in_view(doc, scrolloff);
-        })?;
+    doc.reload(view, &cx.editor.diff_providers).map(|_| {
+        view.ensure_cursor_in_view(doc, scrolloff);
+    })?;
     if let Some(path) = doc.path().map(ToOwned::to_owned) {
         cx.editor
             .language_servers
@@ -1638,16 +1636,7 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         // Ensure that the view is synced with the document's history.
         view.sync_changes(doc);
 
-        // Per-document trust: each doc's workspace may differ.
-        let trust_full = cx
-            .editor
-            .workspace_trust
-            .query(
-                doc.workspace_root(),
-                helix_loader::workspace_trust::TrustQuery::Git,
-            )
-            .is_trusted();
-        if let Err(error) = doc.reload(view, &cx.editor.diff_providers, trust_full) {
+        if let Err(error) = doc.reload(view, &cx.editor.diff_providers) {
             cx.editor.set_error(format!("{}", error));
             continue;
         }
@@ -4546,19 +4535,6 @@ fn complete_expansion_kind(content: &str, offset: usize) -> Vec<ui::prompt::Comp
 fn current_workspace(cx: &compositor::Context) -> std::path::PathBuf {
     let (_, doc) = current_ref!(cx.editor);
     doc.workspace_root().to_path_buf()
-}
-
-/// Whether the currently focused document's workspace is trusted for git operations (gix
-/// `Trust::Full`).
-fn doc_trust_full(editor: &helix_view::Editor) -> bool {
-    let (_, doc) = current_ref!(editor);
-    editor
-        .workspace_trust
-        .query(
-            doc.workspace_root(),
-            helix_loader::workspace_trust::TrustQuery::Git,
-        )
-        .is_trusted()
 }
 
 fn trust_workspace(

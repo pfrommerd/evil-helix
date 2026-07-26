@@ -56,6 +56,11 @@ jobs:
           cache-grammars: 'true'
           grammar-cache-version: ${{ env.GRAMMAR_CACHE_VERSION }}
 
+      - name: Install Jujutsu
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: jj-cli@0.43.0
+
       - name: Run cargo test
         run: cargo test --workspace
 

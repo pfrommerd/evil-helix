@@ -2321,16 +2321,10 @@ impl Editor {
                 Editor::doc_diagnostics(&self.language_servers, &self.diagnostics, &doc);
             doc.replace_diagnostics(diagnostics, &[], None);
 
-            let trust_full = self
-                .workspace_trust
-                .query(doc.workspace_root(), TrustQuery::Git)
-                .is_trusted();
-            if let Some(diff_base) = self.diff_providers.get_diff_base(&path, trust_full) {
+            if let Some(diff_base) = self.diff_providers.get_diff_base(&path) {
                 doc.set_diff_base(diff_base);
             }
-            doc.set_version_control_head(
-                self.diff_providers.get_current_head_name(&path, trust_full),
-            );
+            doc.set_version_control_head(self.diff_providers.get_current_head_name(&path));
 
             let id = self.new_document(doc);
             self.launch_language_servers(id);

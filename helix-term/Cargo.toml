@@ -31,10 +31,9 @@ assets = [
 ]
 
 [features]
-default = ["git"]
+default = []
 unicode-lines = ["helix-core/unicode-lines", "helix-view/unicode-lines"]
 integration = ["helix-event/integration_test"]
-git = ["helix-vcs/git"]
 
 [[bin]]
 name = "hx"

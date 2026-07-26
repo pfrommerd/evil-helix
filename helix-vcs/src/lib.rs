@@ -1,6 +1,6 @@
 //! `helix_vcs` provides types for working with diffs from a Version Control System (VCS).
-//! Currently `git` is the only supported provider for diffs, but this architecture allows
-//! for other providers to be added in the future.
+//! Jujutsu is queried through its command-line template interface. This avoids coupling the
+//! editor to a particular `jj-lib` build or storage backend.
 
 use anyhow::{anyhow, bail, Result};
 use arc_swap::ArcSwap;
@@ -9,8 +9,7 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "git")]
-mod git;
+mod jj;
 
 mod diff;
 
@@ -20,20 +19,31 @@ mod status;
 
 pub use status::FileChange;
 
-/// Contains all active diff providers. Diff providers are compiled in via features. Currently
-/// only `git` is supported.
+/// Contains all active diff providers.
 #[derive(Clone)]
 pub struct DiffProviderRegistry {
     providers: Vec<DiffProvider>,
 }
 
 impl DiffProviderRegistry {
+    /// Explicitly refresh jj's persisted working-copy state. Read queries never snapshot.
+    pub fn snapshot_working_copy(self, cwd: PathBuf) {
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) = jj::snapshot(&cwd) {
+                log::debug!(
+                    "failed to snapshot jj working copy in {}: {err:#}",
+                    cwd.display()
+                );
+            }
+        });
+    }
+
     /// Get the given file from the VCS. This provides the unedited document as a "base"
     /// for a diff to be created.
-    pub fn get_diff_base(&self, file: &Path, trust_full: bool) -> Option<Vec<u8>> {
+    pub fn get_diff_base(&self, file: &Path) -> Option<Vec<u8>> {
         self.providers
             .iter()
-            .find_map(|provider| match provider.get_diff_base(file, trust_full) {
+            .find_map(|provider| match provider.get_diff_base(file) {
                 Ok(res) => Some(res),
                 Err(err) => {
                     log::debug!("{err:#?}");
@@ -43,22 +53,18 @@ impl DiffProviderRegistry {
             })
     }
 
-    /// Get the current name of the current [HEAD](https://stackoverflow.com/questions/2304087/what-is-head-in-git).
-    pub fn get_current_head_name(
-        &self,
-        file: &Path,
-        trust_full: bool,
-    ) -> Option<Arc<ArcSwap<Box<str>>>> {
-        self.providers.iter().find_map(|provider| {
-            match provider.get_current_head_name(file, trust_full) {
+    /// Get a display label for the current working-copy change.
+    pub fn get_current_head_name(&self, file: &Path) -> Option<Arc<ArcSwap<Box<str>>>> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_current_head_name(file) {
                 Ok(res) => Some(res),
                 Err(err) => {
                     log::debug!("{err:#?}");
                     log::debug!("failed to obtain current head name for {}", file.display());
                     None
                 }
-            }
-        })
+            })
     }
 
     /// Fire-and-forget changed file iteration. Runs everything in a background task. Keeps
@@ -66,14 +72,19 @@ impl DiffProviderRegistry {
     pub fn for_each_changed_file(
         self,
         cwd: PathBuf,
-        trust_full: bool,
         f: impl Fn(Result<FileChange>) -> bool + Send + 'static,
     ) {
         tokio::task::spawn_blocking(move || {
+            // The picker is an explicit freshness boundary. Keep the subsequent status query
+            // operation-pinned and snapshot-free.
+            if let Err(err) = jj::snapshot(&cwd) {
+                f(Err(err));
+                return;
+            }
             if self
                 .providers
                 .iter()
-                .find_map(|provider| provider.for_each_changed_file(&cwd, trust_full, &f).ok())
+                .find_map(|provider| provider.for_each_changed_file(&cwd, &f).ok())
                 .is_none()
             {
                 f(Err(anyhow!("no diff provider returns success")));
@@ -84,13 +95,7 @@ impl DiffProviderRegistry {
 
 impl Default for DiffProviderRegistry {
     fn default() -> Self {
-        // currently only git is supported
-        // TODO make this configurable when more providers are added
-        let providers = vec![
-            #[cfg(feature = "git")]
-            DiffProvider::Git,
-            DiffProvider::None,
-        ];
+        let providers = vec![DiffProvider::Jj, DiffProvider::None];
         DiffProviderRegistry { providers }
     }
 }
@@ -101,33 +106,26 @@ impl Default for DiffProviderRegistry {
 /// `Copy` is simply to ensure the `clone()` call is the simplest it can be.
 #[derive(Copy, Clone)]
 enum DiffProvider {
-    #[cfg(feature = "git")]
-    Git,
+    Jj,
     None,
 }
 
 impl DiffProvider {
-    fn get_diff_base(&self, file: &Path, trust_full: bool) -> Result<Vec<u8>> {
+    fn get_diff_base(&self, file: &Path) -> Result<Vec<u8>> {
         match self {
-            #[cfg(feature = "git")]
-            Self::Git => git::get_diff_base(file, trust_full),
+            Self::Jj => jj::get_diff_base(file),
             Self::None => {
-                let _ = (file, trust_full);
+                let _ = file;
                 bail!("No diff support compiled in")
             }
         }
     }
 
-    fn get_current_head_name(
-        &self,
-        file: &Path,
-        trust_full: bool,
-    ) -> Result<Arc<ArcSwap<Box<str>>>> {
+    fn get_current_head_name(&self, file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
         match self {
-            #[cfg(feature = "git")]
-            Self::Git => git::get_current_head_name(file, trust_full),
+            Self::Jj => jj::get_current_head_name(file),
             Self::None => {
-                let _ = (file, trust_full);
+                let _ = file;
                 bail!("No diff support compiled in")
             }
         }
@@ -136,14 +134,12 @@ impl DiffProvider {
     fn for_each_changed_file(
         &self,
         cwd: &Path,
-        trust_full: bool,
         f: impl Fn(Result<FileChange>) -> bool,
     ) -> Result<()> {
         match self {
-            #[cfg(feature = "git")]
-            Self::Git => git::for_each_changed_file(cwd, trust_full, f),
+            Self::Jj => jj::for_each_changed_file(cwd, f),
             Self::None => {
-                let _ = (cwd, trust_full, f);
+                let _ = (cwd, f);
                 bail!("No diff support compiled in")
             }
         }
