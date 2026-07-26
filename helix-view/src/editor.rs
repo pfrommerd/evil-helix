@@ -300,6 +300,8 @@ pub struct FileTreeConfig {
     pub auto_reveal: bool,
     /// Show language-server diagnostics.
     pub diagnostics: bool,
+    /// Decorate loaded file-tree entries with VCS state when available.
+    pub vcs_decorations: bool,
 }
 
 impl Default for FileTreeConfig {
@@ -320,6 +322,7 @@ impl Default for FileTreeConfig {
             flatten_dirs: true,
             auto_reveal: true,
             diagnostics: true,
+            vcs_decorations: true,
         }
     }
 }

@@ -3,10 +3,15 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver},
+        Arc, Mutex,
+    },
 };
 
 use helix_core::Position;
+use helix_vcs::FileChange;
 use helix_view::{
     editor::Action,
     graphics::{CursorKind, Modifier, Rect, Style},
@@ -26,6 +31,8 @@ use crate::{
 };
 
 const MIN_EDITOR_WIDTH: u16 = 20;
+const MAX_VCS_QUERY_PATHS: usize = 512;
+const MAX_VCS_CACHED_PATHS: usize = 16 * 1024;
 
 fn new_search_matcher(num_threads: Option<usize>) -> Nucleo<PathBuf> {
     Nucleo::new(
@@ -43,6 +50,30 @@ struct Row {
     depth: usize,
     is_dir: bool,
     expansion_root: PathBuf,
+    deleted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VcsState {
+    New,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug)]
+enum VcsUpdate {
+    Change {
+        generation: u64,
+        path: PathBuf,
+        state: VcsState,
+        leaf: bool,
+        visible: bool,
+        deleted_ghost: bool,
+    },
+    Complete {
+        generation: u64,
+        succeeded: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +128,7 @@ pub struct FileTree {
     directory_entries: HashMap<PathBuf, Vec<Row>>,
     manual_expanded: HashSet<PathBuf>,
     provisional_expanded: HashSet<PathBuf>,
+    provisional_collapsed: HashSet<PathBuf>,
     marked: HashSet<PathBuf>,
     cursor: usize,
     scroll: usize,
@@ -119,6 +151,16 @@ pub struct FileTree {
     search_restore_path: Option<PathBuf>,
     search_results_dirty: bool,
     search_initialized: bool,
+    vcs_states: HashMap<PathBuf, VcsState>,
+    vcs_leaf_states: HashMap<PathBuf, VcsState>,
+    pending_vcs_states: HashMap<PathBuf, VcsState>,
+    pending_vcs_leaf_states: HashMap<PathBuf, VcsState>,
+    pending_deleted_ghosts: Vec<PathBuf>,
+    pending_vcs_resets_leaf_cache: bool,
+    vcs_generation: u64,
+    vcs_updates: Option<Receiver<VcsUpdate>>,
+    vcs_query_paths: Vec<PathBuf>,
+    vcs_needs_refresh: bool,
 }
 
 impl FileTree {
@@ -134,6 +176,7 @@ impl FileTree {
             directory_entries: HashMap::new(),
             manual_expanded,
             provisional_expanded: HashSet::new(),
+            provisional_collapsed: HashSet::new(),
             marked: HashSet::new(),
             cursor: 0,
             scroll: 0,
@@ -161,6 +204,16 @@ impl FileTree {
             search_restore_path: None,
             search_results_dirty: false,
             search_initialized: false,
+            vcs_states: HashMap::new(),
+            vcs_leaf_states: HashMap::new(),
+            pending_vcs_states: HashMap::new(),
+            pending_vcs_leaf_states: HashMap::new(),
+            pending_deleted_ghosts: Vec::new(),
+            pending_vcs_resets_leaf_cache: false,
+            vcs_generation: 0,
+            vcs_updates: None,
+            vcs_query_paths: Vec::new(),
+            vcs_needs_refresh: true,
         };
         if tree.visible {
             tree.refresh(editor);
@@ -176,6 +229,7 @@ impl FileTree {
             self.rows.clear();
             self.directory_entries.clear();
         } else {
+            self.vcs_needs_refresh = true;
             self.refresh(editor);
         }
     }
@@ -279,6 +333,7 @@ impl FileTree {
             self.manual_expanded.clear();
             self.manual_expanded.insert(self.root.clone());
             self.provisional_expanded.clear();
+            self.provisional_collapsed.clear();
             self.directory_entries.clear();
             self.marked.clear();
             self.clipboard = None;
@@ -292,6 +347,7 @@ impl FileTree {
             self.search_restore_path = None;
             self.search_results_dirty = false;
             self.search_initialized = false;
+            self.vcs_needs_refresh = true;
         }
 
         if !self.visible {
@@ -311,6 +367,11 @@ impl FileTree {
             }
         }
         self.provisional_expanded = self.provisional_expansions(editor);
+        self.provisional_collapsed.retain(|collapsed| {
+            self.provisional_expanded
+                .iter()
+                .any(|expanded| expanded.starts_with(collapsed))
+        });
         let mut directories: Vec<_> = self.effective_expansions().cloned().collect();
         directories.sort_by_key(|path| path.components().count());
         for directory in directories {
@@ -330,6 +391,7 @@ impl FileTree {
             }
         }
         self.clamp_cursor();
+        self.request_vcs_decorations(editor);
     }
 
     pub fn collapse_all(&mut self, editor: &Editor) {
@@ -346,9 +408,16 @@ impl FileTree {
         }
         self.manual_expanded.clear();
         self.manual_expanded.insert(self.root.clone());
+        self.provisional_collapsed.extend(
+            self.provisional_expanded
+                .iter()
+                .filter(|path| **path != self.root)
+                .cloned(),
+        );
         self.prune_directory_entries();
         self.rebuild_rows(editor);
         self.clamp_cursor();
+        self.request_vcs_decorations(editor);
     }
 
     pub fn watched_directories(&self) -> Vec<PathBuf> {
@@ -363,6 +432,7 @@ impl FileTree {
             return;
         }
         if rescan {
+            self.vcs_needs_refresh = true;
             self.refresh(editor);
             return;
         }
@@ -393,6 +463,8 @@ impl FileTree {
             self.start_search_scan(editor);
         }
         self.clamp_cursor();
+        self.vcs_needs_refresh = true;
+        self.request_vcs_decorations(editor);
     }
 
     fn load_directory(&mut self, dir: &Path, editor: &Editor) {
@@ -587,25 +659,44 @@ impl FileTree {
     }
 
     fn is_expanded(&self, path: &Path) -> bool {
-        self.manual_expanded.contains(path) || self.provisional_expanded.contains(path)
+        self.manual_expanded.contains(path)
+            || (self.provisional_expanded.contains(path)
+                && !self
+                    .provisional_collapsed
+                    .iter()
+                    .any(|collapsed| path.starts_with(collapsed)))
     }
 
     fn effective_expansions(&self) -> impl Iterator<Item = &PathBuf> {
         self.manual_expanded
             .iter()
-            .chain(self.provisional_expanded.iter())
+            .chain(self.provisional_expanded.iter().filter(|path| {
+                !self
+                    .provisional_collapsed
+                    .iter()
+                    .any(|collapsed| path.starts_with(collapsed))
+            }))
     }
 
     fn remove_expansion_subtree(&mut self, root: &Path) {
         self.manual_expanded.retain(|path| !path.starts_with(root));
         self.provisional_expanded
             .retain(|path| !path.starts_with(root));
+        self.provisional_collapsed
+            .retain(|path| !path.starts_with(root));
         self.directory_entries
             .retain(|path, _| !path.starts_with(root));
     }
 
-    fn collapse_manual_subtree(&mut self, root: &Path) {
+    fn collapse_expansion_subtree(&mut self, root: &Path) {
         self.manual_expanded.retain(|path| !path.starts_with(root));
+        if self
+            .provisional_expanded
+            .iter()
+            .any(|path| path.starts_with(root))
+        {
+            self.provisional_collapsed.insert(root.to_path_buf());
+        }
         self.prune_directory_entries();
     }
 
@@ -616,6 +707,8 @@ impl FileTree {
     }
 
     fn expand_directory(&mut self, path: PathBuf, editor: &Editor) {
+        self.provisional_collapsed
+            .retain(|collapsed| !collapsed.starts_with(&path));
         let flatten = editor.config().file_tree.flatten_dirs;
         let mut ancestors = path
             .ancestors()
@@ -649,6 +742,199 @@ impl FileTree {
         }
         self.rebuild_rows(editor);
         self.clamp_cursor();
+        self.request_vcs_decorations(editor);
+    }
+
+    fn request_vcs_decorations(&mut self, editor: &Editor) {
+        if !self.visible || !editor.config().file_tree.vcs_decorations {
+            self.vcs_states.clear();
+            self.vcs_leaf_states.clear();
+            self.pending_vcs_states.clear();
+            self.pending_vcs_leaf_states.clear();
+            self.pending_deleted_ghosts.clear();
+            self.pending_vcs_resets_leaf_cache = false;
+            self.vcs_updates = None;
+            self.vcs_query_paths.clear();
+            self.vcs_needs_refresh = true;
+            return;
+        }
+        let tracked = self
+            .rows
+            .iter()
+            .map(|row| row.path.clone())
+            .collect::<HashSet<_>>();
+        let directories = self
+            .directory_entries
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut query_paths = tracked.iter().cloned().collect::<Vec<_>>();
+        query_paths.sort();
+        query_paths.truncate(MAX_VCS_QUERY_PATHS);
+        if !self.vcs_needs_refresh && query_paths == self.vcs_query_paths {
+            return;
+        }
+        let resets_leaf_cache = self.vcs_needs_refresh;
+        self.vcs_generation = self.vcs_generation.wrapping_add(1);
+        self.vcs_needs_refresh = false;
+        self.vcs_query_paths = query_paths.clone();
+        self.pending_vcs_states.clear();
+        self.pending_vcs_leaf_states.clear();
+        self.pending_deleted_ghosts.clear();
+        self.pending_vcs_resets_leaf_cache = resets_leaf_cache;
+        let generation = self.vcs_generation;
+        let root = self.root.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.vcs_updates = Some(receiver);
+        let complete_sender = sender.clone();
+        let sent_states = Arc::new(Mutex::new(HashMap::new()));
+        let cached_leaf_count = Arc::new(AtomicUsize::new(0));
+        editor.diff_providers.clone().for_each_changed_file_in(
+            root.clone(),
+            query_paths,
+            move |change| {
+                let Ok(change) = change else {
+                    return true;
+                };
+                let (path, state) = match &change {
+                    FileChange::Untracked { path } => (path.clone(), VcsState::New),
+                    FileChange::Modified { path }
+                    | FileChange::Conflict { path }
+                    | FileChange::Renamed { to_path: path, .. } => {
+                        (path.clone(), VcsState::Modified)
+                    }
+                    FileChange::Deleted { path } => (path.clone(), VcsState::Deleted),
+                };
+                let deleted_ghost = state == VcsState::Deleted
+                    && path
+                        .parent()
+                        .is_some_and(|parent| directories.contains(parent));
+                let visible_leaf = tracked.contains(&path);
+                let cache_leaf = visible_leaf
+                    || cached_leaf_count
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                            (count < MAX_VCS_CACHED_PATHS).then_some(count + 1)
+                        })
+                        .is_ok();
+                let send_update =
+                    |path: &Path, state: VcsState, leaf: bool, visible: bool, deleted_ghost| {
+                        let mut sent_states = sent_states.lock().expect("VCS status lock poisoned");
+                        if sent_states
+                            .get(path)
+                            .is_some_and(|previous| *previous == state)
+                        {
+                            return;
+                        }
+                        sent_states.insert(path.to_path_buf(), state);
+                        drop(sent_states);
+                        let _ = sender.send(VcsUpdate::Change {
+                            generation,
+                            path: path.to_path_buf(),
+                            state,
+                            leaf,
+                            visible,
+                            deleted_ghost,
+                        });
+                    };
+                if cache_leaf {
+                    send_update(&path, state, true, visible_leaf, deleted_ghost);
+                }
+                let mut current = path.parent();
+                while let Some(candidate) = current {
+                    if tracked.contains(candidate) {
+                        send_update(candidate, VcsState::Modified, false, true, false);
+                    }
+                    if candidate == root {
+                        break;
+                    }
+                    current = candidate.parent();
+                }
+                true
+            },
+            move |result| {
+                let _ = complete_sender.send(VcsUpdate::Complete {
+                    generation,
+                    succeeded: result.is_ok(),
+                });
+            },
+        );
+    }
+
+    fn poll_vcs_updates(&mut self, editor: &Editor) {
+        let mut completed = false;
+        let updates = self
+            .vcs_updates
+            .as_ref()
+            .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for update in updates {
+            match update {
+                VcsUpdate::Change {
+                    generation,
+                    path,
+                    state,
+                    leaf,
+                    visible,
+                    deleted_ghost,
+                } if generation == self.vcs_generation => {
+                    if deleted_ghost {
+                        self.pending_deleted_ghosts.push(path.clone());
+                    }
+                    if visible {
+                        self.pending_vcs_states.insert(path.clone(), state);
+                    }
+                    if leaf {
+                        self.pending_vcs_leaf_states.insert(path, state);
+                    }
+                }
+                VcsUpdate::Complete {
+                    generation,
+                    succeeded: true,
+                } if generation == self.vcs_generation => completed = true,
+                _ => {}
+            }
+        }
+        if completed {
+            for entries in self.directory_entries.values_mut() {
+                entries.retain(|row| !row.deleted);
+            }
+            for path in self.pending_deleted_ghosts.drain(..) {
+                if let Some(parent) = path.parent() {
+                    if let Some(entries) = self.directory_entries.get_mut(parent) {
+                        if !entries.iter().any(|row| row.path == path) {
+                            entries.push(Row {
+                                name: path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                expansion_root: path.clone(),
+                                path,
+                                depth: 0,
+                                is_dir: false,
+                                deleted: true,
+                            });
+                        }
+                    }
+                }
+            }
+            std::mem::swap(&mut self.vcs_states, &mut self.pending_vcs_states);
+            self.pending_vcs_states.clear();
+            if self.pending_vcs_resets_leaf_cache {
+                self.vcs_leaf_states.clear();
+            }
+            for (path, state) in self.pending_vcs_leaf_states.drain() {
+                if self.vcs_leaf_states.len() < MAX_VCS_CACHED_PATHS
+                    || self.vcs_leaf_states.contains_key(&path)
+                {
+                    self.vcs_leaf_states.insert(path, state);
+                }
+            }
+            self.pending_vcs_resets_leaf_cache = false;
+            self.rebuild_rows(editor);
+            self.clamp_cursor();
+            helix_event::request_redraw();
+        }
     }
 
     fn provisional_expansions(&self, editor: &Editor) -> HashSet<PathBuf> {
@@ -685,6 +971,26 @@ impl FileTree {
             parent = child;
         }
         Some(ancestors)
+    }
+
+    /// Returns the visible file and directory rows containing an unsaved buffer.
+    ///
+    /// This is deliberately derived while rendering instead of being cached: document edits
+    /// already request a redraw, and checking the small set of open buffers avoids both a VCS
+    /// query and a walk of the (potentially very large) file tree.
+    fn unsaved_buffer_paths(&self, editor: &Editor) -> HashSet<PathBuf> {
+        let mut paths = HashSet::new();
+        for document in editor.documents().filter(|document| document.is_modified()) {
+            let Some(path) = document.path() else {
+                continue;
+            };
+            let Some(ancestors) = self.visible_ancestors(path, editor) else {
+                continue;
+            };
+            paths.extend(ancestors);
+            paths.insert(path.to_path_buf());
+        }
+        paths
     }
 }
 
@@ -736,6 +1042,7 @@ fn read_directory(dir: &Path, show_hidden: bool, editor: &Editor) -> Vec<Row> {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 depth: 0,
                 is_dir,
+                deleted: false,
             })
         })
         .collect()
@@ -817,6 +1124,7 @@ fn collect_search_rows(
             depth,
             is_dir: entry.is_dir,
             expansion_root,
+            deleted: false,
         });
         if entry.is_dir && !collapsed.contains(&path) {
             collect_search_rows(&path, depth + 1, children, collapsed, flatten_dirs, out);
@@ -971,7 +1279,7 @@ impl FileTree {
         let Some(path) = self
             .rows
             .get(self.cursor)
-            .filter(|row| !row.is_dir)
+            .filter(|row| !row.is_dir && !row.deleted)
             .map(|row| row.path.clone())
         else {
             return;
@@ -1008,7 +1316,7 @@ impl FileTree {
             return;
         }
         if self.is_expanded(&row.expansion_root) {
-            self.collapse_manual_subtree(&row.expansion_root);
+            self.collapse_expansion_subtree(&row.expansion_root);
             self.rebuild_rows(editor);
             self.clamp_cursor();
         } else {
@@ -1040,7 +1348,7 @@ impl FileTree {
             return;
         }
         if row.is_dir && self.is_expanded(&row.expansion_root) {
-            self.collapse_manual_subtree(&row.expansion_root);
+            self.collapse_expansion_subtree(&row.expansion_root);
             self.rebuild_rows(editor);
             self.clamp_cursor();
             return;
@@ -1312,6 +1620,7 @@ impl FileTree {
             return EventResult::Ignored(None);
         }
         self.poll_search_matcher(cx.editor);
+        self.poll_vcs_updates(cx.editor);
         if self.search_focused {
             match event {
                 Event::Key(key!(':')) => return EventResult::Ignored(None),
@@ -1427,7 +1736,10 @@ impl FileTree {
             FileTreeAction::CreateDirectory => return Some(self.prompt_create(true)),
             FileTreeAction::Rename => return self.prompt_rename(),
             FileTreeAction::Delete => return self.prompt_delete(editor),
-            FileTreeAction::Refresh => self.refresh(editor),
+            FileTreeAction::Refresh => {
+                self.vcs_needs_refresh = true;
+                self.refresh(editor);
+            }
             FileTreeAction::CollapseAll => self.collapse_all(editor),
             FileTreeAction::ToggleHidden => {
                 self.show_hidden = !self.show_hidden;
@@ -1450,6 +1762,7 @@ impl FileTree {
             self.refresh(cx.editor);
         }
         self.poll_search_matcher(cx.editor);
+        self.poll_vcs_updates(cx.editor);
         self.last_height = area.height.saturating_sub(1) as usize;
         if self.pending_center {
             self.center_cursor();
@@ -1461,9 +1774,11 @@ impl FileTree {
         let editor = &mut *cx.editor;
         let background = editor.theme.get("ui.background");
         let text = editor.theme.get("ui.text");
+        let inactive = editor.theme.get("ui.text.inactive");
         let directory = editor.theme.get("ui.text.directory");
         let selected = editor.theme.get("ui.selection");
         let border = editor.theme.get("ui.window");
+        let vcs_decorations = editor.config().file_tree.vcs_decorations;
         surface.clear_with(area, background);
         for y in area.top()..area.bottom() {
             surface[(area.x, y)].set_symbol("│").set_style(border);
@@ -1477,6 +1792,11 @@ impl FileTree {
             .documents()
             .filter_map(|document| document.path().map(Path::to_path_buf))
             .collect::<HashSet<_>>();
+        let unsaved_buffer_paths = if vcs_decorations {
+            self.unsaved_buffer_paths(editor)
+        } else {
+            HashSet::new()
+        };
         let diagnostics = if editor.config().file_tree.diagnostics {
             aggregate_diagnostics(editor.workspace_diagnostic_counts(), &self.root)
         } else {
@@ -1512,21 +1832,77 @@ impl FileTree {
             };
             let name = &row.name;
             let badge = metadata_badge(diagnostics.get(&row.path).copied());
-            let line = format!("{marker} {}{disclosure} {name}", "  ".repeat(row.depth));
+            let prefix = tree_prefix(marker, row.depth, disclosure);
+            let vcs_state = if vcs_decorations {
+                self.vcs_states
+                    .get(&row.path)
+                    .or_else(|| self.vcs_leaf_states.get(&row.path))
+                    .copied()
+            } else {
+                None
+            };
+            let (vcs_marker, vcs_style) = match vcs_state {
+                Some(VcsState::New) => ("N", editor.theme.get("diff.plus")),
+                Some(VcsState::Modified) => ("M", editor.theme.get("diff.delta")),
+                Some(VcsState::Deleted) => ("D", editor.theme.get("diff.minus")),
+                None => (" ", text),
+            };
+            let unsaved_marker = if unsaved_buffer_paths.contains(&row.path) {
+                "*"
+            } else {
+                " "
+            };
             let mut style: Style = if row.is_dir { directory } else { text };
-            if active_path.as_ref() == Some(&row.path) {
-                style = style.add_modifier(Modifier::BOLD);
+            if row.deleted {
+                style = editor
+                    .theme
+                    .get("diff.minus")
+                    .add_modifier(Modifier::ITALIC);
+            } else if active_path.as_ref() == Some(&row.path) {
+                style = inactive.add_modifier(Modifier::BOLD);
             } else if open_paths.contains(&row.path) {
-                style = style.add_modifier(Modifier::ITALIC);
+                style = inactive.add_modifier(Modifier::ITALIC);
             }
-            if index == self.cursor && self.focused && !self.search_focused {
-                style = style.patch(selected);
+            let selection_background =
+                if index == self.cursor && self.focused && !self.search_focused {
+                    Some(Style {
+                        bg: selected.bg,
+                        ..Style::default()
+                    })
+                } else {
+                    None
+                };
+            if let Some(selection_background) = selection_background {
+                style = style.patch(selection_background);
             }
+            let vcs_style =
+                selection_background.map_or(vcs_style, |background| vcs_style.patch(background));
+            let unsaved_style = selection_background
+                .map_or(editor.theme.get("diff.delta"), |background| {
+                    editor.theme.get("diff.delta").patch(background)
+                });
             surface.set_stringn(
-                area.x.saturating_add(1),
+                area.x.saturating_add(3),
                 y,
-                &line,
-                area.width.saturating_sub(2) as usize,
+                &prefix,
+                area.width.saturating_sub(4) as usize,
+                style,
+            );
+            let prefix_x = area.x.saturating_add(3);
+            surface.set_stringn(area.x.saturating_add(1), y, vcs_marker, 1, vcs_style);
+            surface.set_stringn(
+                area.x.saturating_add(2),
+                y,
+                unsaved_marker,
+                1,
+                unsaved_style,
+            );
+            let name_x = prefix_x.saturating_add(prefix.chars().count() as u16);
+            surface.set_stringn(
+                name_x,
+                y,
+                name,
+                area.right().saturating_sub(name_x.saturating_add(1)) as usize,
                 style,
             );
             if !badge.is_empty() {
@@ -1624,6 +2000,10 @@ fn metadata_badge(diagnostics: Option<(usize, usize)>) -> String {
     badge
 }
 
+fn tree_prefix(marker: &str, depth: usize, disclosure: &str) -> String {
+    format!("{marker}{}{disclosure} ", "  ".repeat(depth))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1635,6 +2015,7 @@ mod tests {
             directory_entries: HashMap::new(),
             manual_expanded: HashSet::new(),
             provisional_expanded: HashSet::new(),
+            provisional_collapsed: HashSet::new(),
             marked: HashSet::new(),
             cursor: 0,
             scroll: 0,
@@ -1662,6 +2043,16 @@ mod tests {
             search_restore_path: None,
             search_results_dirty: false,
             search_initialized: false,
+            vcs_states: HashMap::new(),
+            vcs_leaf_states: HashMap::new(),
+            pending_vcs_states: HashMap::new(),
+            pending_vcs_leaf_states: HashMap::new(),
+            pending_deleted_ghosts: Vec::new(),
+            pending_vcs_resets_leaf_cache: false,
+            vcs_generation: 0,
+            vcs_updates: None,
+            vcs_query_paths: Vec::new(),
+            vcs_needs_refresh: true,
         }
     }
 
@@ -1672,7 +2063,16 @@ mod tests {
             depth: 0,
             is_dir: false,
             expansion_root: tree.root.clone(),
+            deleted: false,
         }));
+    }
+
+    #[test]
+    fn tree_prefix_leaves_only_the_marker_column_before_the_disclosure() {
+        assert_eq!(tree_prefix(" ", 0, ">"), " > ");
+        assert_eq!(format!("M {}", tree_prefix(" ", 0, ">")), "M  > ");
+        assert_eq!(format!("M*{}", tree_prefix(" ", 0, ">")), "M* > ");
+        assert_eq!(tree_prefix(" ", 2, ">"), "     > ");
     }
 
     #[test]
@@ -1996,6 +2396,7 @@ mod tests {
             depth,
             is_dir: depth < 2,
             expansion_root: root.clone(),
+            deleted: false,
         })
         .collect::<Vec<_>>();
 
@@ -2030,6 +2431,7 @@ mod tests {
             depth: 0,
             is_dir: true,
             expansion_root: root.join("test"),
+            deleted: false,
         };
         let mut tree = empty_tree(root.clone());
         tree.rows = vec![
@@ -2039,6 +2441,7 @@ mod tests {
                 depth: 0,
                 is_dir: false,
                 expansion_root: root.join("other"),
+                deleted: false,
             },
             Row {
                 path: root.join("test"),
@@ -2046,6 +2449,7 @@ mod tests {
                 depth: 0,
                 is_dir: true,
                 expansion_root: root.join("test"),
+                deleted: false,
             },
         ];
 
@@ -2146,7 +2550,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsing_provisional_directory_only_clears_manual_ownership() {
+    fn collapsing_provisional_directory_honors_user_collapse() {
         let root = PathBuf::from("/workspace");
         let src = root.join("src");
         let mut tree = empty_tree(root.clone());
@@ -2156,11 +2560,15 @@ mod tests {
         tree.directory_entries.insert(root, Vec::new());
         tree.directory_entries.insert(src.clone(), Vec::new());
 
-        tree.collapse_manual_subtree(&src);
+        tree.collapse_expansion_subtree(&src);
 
         assert!(!tree.manual_expanded.contains(&src));
+        assert!(!tree.is_expanded(&src));
+        assert!(tree.provisional_collapsed.contains(&src));
+        assert!(!tree.directory_entries.contains_key(&src));
+
+        tree.manual_expanded.insert(src.clone());
         assert!(tree.is_expanded(&src));
-        assert!(tree.directory_entries.contains_key(&src));
     }
 
     #[test]

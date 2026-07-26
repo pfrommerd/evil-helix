@@ -84,11 +84,29 @@ impl DiffProviderRegistry {
             if self
                 .providers
                 .iter()
-                .find_map(|provider| provider.for_each_changed_file(&cwd, &f).ok())
+                .find_map(|provider| provider.for_each_changed_file(&cwd, &[], &f).ok())
                 .is_none()
             {
                 f(Err(anyhow!("no diff provider returns success")));
             }
+        });
+    }
+
+    /// Iterate changed files under the supplied paths. An empty path list queries the workspace.
+    pub fn for_each_changed_file_in(
+        self,
+        cwd: PathBuf,
+        paths: Vec<PathBuf>,
+        f: impl Fn(Result<FileChange>) -> bool + Send + 'static,
+        on_complete: impl FnOnce(Result<()>) + Send + 'static,
+    ) {
+        tokio::task::spawn_blocking(move || {
+            let result = self
+                .providers
+                .iter()
+                .find_map(|provider| provider.for_each_changed_file(&cwd, &paths, &f).ok())
+                .ok_or_else(|| anyhow!("no diff provider returns success"));
+            on_complete(result);
         });
     }
 }
@@ -134,12 +152,13 @@ impl DiffProvider {
     fn for_each_changed_file(
         &self,
         cwd: &Path,
+        paths: &[PathBuf],
         f: impl Fn(Result<FileChange>) -> bool,
     ) -> Result<()> {
         match self {
-            Self::Jj => jj::for_each_changed_file(cwd, f),
+            Self::Jj => jj::for_each_changed_file(cwd, paths, f),
             Self::None => {
-                let _ = (cwd, f);
+                let _ = (cwd, paths, f);
                 bail!("No diff support compiled in")
             }
         }
