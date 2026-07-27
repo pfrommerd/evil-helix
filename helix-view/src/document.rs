@@ -2594,6 +2594,24 @@ mod test {
     }
 
     #[test]
+    fn detects_external_creation_of_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        let doc = Document::open(
+            &path,
+            None,
+            false,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        )
+        .unwrap();
+
+        assert!(!doc.is_modified());
+        std::fs::write(path, "created elsewhere\n").unwrap();
+        assert!(doc.differs_from_disk().unwrap());
+    }
+
+    #[test]
     fn changeset_to_changes_ignore_line_endings() {
         use helix_lsp::{lsp, Client, OffsetEncoding};
         let text = Rope::from("hello\r\nworld");

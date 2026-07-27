@@ -96,6 +96,15 @@ fn desired_watches(
 ) -> HashMap<PathBuf, RecursiveMode> {
     open_files
         .into_iter()
+        // A new file cannot be watched directly. Watch its parent instead so that a
+        // concurrent create is delivered as an event for the target path.
+        .filter_map(|path| {
+            if path.exists() {
+                Some(path)
+            } else {
+                path.parent().map(PathBuf::from)
+            }
+        })
         .chain(tree_directories)
         .map(|path| (path, RecursiveMode::NonRecursive))
         .collect()
@@ -147,11 +156,18 @@ mod tests {
     }
 
     #[test]
-    fn desired_watches_are_bounded_to_open_files_and_loaded_directories() {
-        let root = PathBuf::from("/workspace");
-        let open = root.join("src/open.rs");
+    fn desired_watches_include_new_file_parents_and_loaded_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().to_path_buf();
+        let open = root.join("open.rs");
+        std::fs::write(&open, "").unwrap();
+        let new_file = root.join("new.rs");
+        let another_new_file = root.join("another-new.rs");
         let expanded = root.join("expanded");
-        let desired = desired_watches([open.clone()], [root.clone(), expanded.clone()]);
+        let desired = desired_watches(
+            [open.clone(), new_file, another_new_file],
+            [root.clone(), expanded.clone()],
+        );
 
         assert_eq!(desired.len(), 3);
         assert_eq!(desired[&open], RecursiveMode::NonRecursive);
