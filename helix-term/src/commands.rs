@@ -492,6 +492,7 @@ impl MappableCommand {
         file_tree_create_directory, "Create a directory from the file tree",
         file_tree_rename, "Rename the selected file-tree entry",
         file_tree_delete, "Delete marked file-tree entries",
+        file_tree_close_buffer, "Close the selected file's open buffer",
         file_tree_toggle_hidden, "Toggle hidden entries in the file tree",
         code_action, "Perform code action",
         buffer_picker, "Open buffer picker",
@@ -3639,6 +3640,7 @@ file_tree_action_commands! {
     file_tree_create_directory => CreateDirectory,
     file_tree_rename => Rename,
     file_tree_delete => Delete,
+    file_tree_close_buffer => CloseBuffer,
     file_tree_toggle_hidden => ToggleHidden,
     file_tree_search => ToggleSearchFocus,
 }

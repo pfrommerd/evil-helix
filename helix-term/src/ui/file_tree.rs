@@ -13,7 +13,7 @@ use std::{
 use helix_core::Position;
 use helix_vcs::FileChange;
 use helix_view::{
-    editor::Action,
+    editor::{Action, CloseError},
     graphics::{CursorKind, Modifier, Rect, Style},
     input::{Event, MouseButton, MouseEventKind},
     Editor,
@@ -112,6 +112,7 @@ pub enum FileTreeAction {
     CreateDirectory,
     Rename,
     Delete,
+    CloseBuffer,
     Refresh,
     CollapseAll,
     ToggleHidden,
@@ -584,9 +585,14 @@ impl FileTree {
             self.search_boundary_dirs.clear();
             self.rebuild_rows(editor);
             if let Some(path) = restoring {
-                self.restore_selected_path(Some(&path), false);
+                self.restore_search_selection(&path);
             }
         }
+    }
+
+    fn restore_search_selection(&mut self, path: &Path) {
+        self.restore_selected_path(Some(path), false);
+        self.center_cursor();
     }
 
     fn start_search_scan(&mut self, editor: &Editor) {
@@ -1292,6 +1298,28 @@ impl FileTree {
         }
     }
 
+    fn close_selected_buffer(&self, editor: &mut Editor) {
+        let Some(path) = self
+            .rows
+            .get(self.cursor)
+            .filter(|row| !row.is_dir && !row.deleted)
+            .map(|row| row.path.as_path())
+        else {
+            return;
+        };
+        let Some(doc_id) = editor.document_id_by_path(path) else {
+            return;
+        };
+        if let Err(err) = editor.close_document(doc_id, false) {
+            let message = match err {
+                CloseError::BufferModified(name) => format!("Cannot close unsaved buffer: {name}"),
+                CloseError::DoesNotExist => return,
+                CloseError::SaveError(err) => format!("Could not close {}: {err}", path.display()),
+            };
+            editor.set_error(message);
+        }
+    }
+
     fn search_directory_expanded(&self, path: &Path) -> bool {
         !self.search_collapsed.contains(path)
             && (!self.search_boundary_dirs.contains(path) || self.search_expanded.contains(path))
@@ -1736,6 +1764,7 @@ impl FileTree {
             FileTreeAction::CreateDirectory => return Some(self.prompt_create(true)),
             FileTreeAction::Rename => return self.prompt_rename(),
             FileTreeAction::Delete => return self.prompt_delete(editor),
+            FileTreeAction::CloseBuffer => self.close_selected_buffer(editor),
             FileTreeAction::Refresh => {
                 self.vcs_needs_refresh = true;
                 self.refresh(editor);
@@ -2420,6 +2449,21 @@ mod tests {
 
         assert_eq!(tree.cursor, 4);
         assert_eq!(tree.scroll, 3);
+    }
+
+    #[test]
+    fn clearing_search_centers_the_restored_selection() {
+        let mut tree = empty_tree(PathBuf::from("/workspace"));
+        add_rows(&mut tree, 20);
+        tree.last_height = 5;
+        tree.cursor = 1;
+        tree.scroll = 1;
+        let restored = tree.rows[10].path.clone();
+
+        tree.restore_search_selection(&restored);
+
+        assert_eq!(tree.cursor, 10);
+        assert_eq!(tree.scroll, 8);
     }
 
     #[test]

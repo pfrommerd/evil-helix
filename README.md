@@ -30,7 +30,8 @@ This fork includes several features and default bindings beyond evil-helix:
 - **Tree navigation and operations:** in the evil keymap, use `l`/`k` to move up/down,
   `j`/`;` to collapse/expand, `H`/`M`/`L` for the top/middle/bottom of the view, and `g`/`G`
   for the beginning/end of the tree. `Enter`, `Ctrl-s`, and `Ctrl-v` open files normally or in
-  splits; `.` toggles hidden files, which are hidden by default.
+  splits; `f` closes the selected file's open buffer; `.` toggles hidden files, which are hidden by
+  default.
 - **Automatic file reload:** native filesystem watching is enabled by default. Clean buffers are
   automatically reloaded when their files change on disk; modified buffers are never overwritten.
 - **Commands from pickers and the tree:** `:` temporarily opens the command line without closing

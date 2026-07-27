@@ -443,6 +443,12 @@ mod tests {
             Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_mark))
         );
         assert_eq!(
+            file_tree.search(&[key!('f')]),
+            Some(&KeyTrie::MappableCommand(
+                MappableCommand::file_tree_close_buffer
+            ))
+        );
+        assert_eq!(
             file_tree.search(&[key!(' '), key!('t')]),
             Some(&KeyTrie::MappableCommand(MappableCommand::file_tree_focus))
         );

@@ -430,6 +430,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "A" => file_tree_create_directory,
         "r" => file_tree_rename,
         "d" => file_tree_delete,
+        "f" => file_tree_close_buffer,
         "R" => file_tree_refresh,
         "z" => file_tree_collapse_all,
         "." => file_tree_toggle_hidden,
