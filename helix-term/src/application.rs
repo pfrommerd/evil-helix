@@ -533,18 +533,18 @@ impl Application {
                 view_ids.push(view_id);
             }
             let reload_view_id = view_ids[0];
-            let providers = self.editor.diff_providers.clone();
             let result = {
                 let doc = doc_mut!(self.editor, &doc_id);
                 let view = view_mut!(self.editor, reload_view_id);
                 view.sync_changes(doc);
-                doc.reload(view, &providers)
+                doc.reload(view)
             };
             if let Err(err) = result {
                 self.editor
                     .set_warning(format!("Could not reload {}: {err}", path.display()));
                 continue;
             }
+            self.editor.queue_vcs_refresh(doc_id, path.clone());
             let scrolloff = self.editor.config().scrolloff;
             for view_id in view_ids {
                 let doc = doc_mut!(self.editor, &doc_id);
@@ -806,15 +806,6 @@ impl Application {
             }
         };
 
-        // jj read queries deliberately use `--ignore-working-copy`; make saving the explicit
-        // synchronization point instead of letting unrelated UI queries snapshot the workspace.
-        if let Some(directory) = doc_save_event.path.parent() {
-            self.editor
-                .diff_providers
-                .clone()
-                .snapshot_working_copy(directory.to_owned());
-        }
-
         let doc = match self.editor.document_mut(doc_save_event.doc_id) {
             None => {
                 warn!(
@@ -899,6 +890,9 @@ impl Application {
                 }
             }
             EditorEvent::Redraw => {
+                self.render().await;
+            }
+            EditorEvent::VcsRefresh => {
                 self.render().await;
             }
             EditorEvent::IdleTimer => {

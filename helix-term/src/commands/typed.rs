@@ -1591,11 +1591,15 @@ fn reload(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
     }
 
     let scrolloff = cx.editor.config().scrolloff;
-    let (view, doc) = current!(cx.editor);
-    doc.reload(view, &cx.editor.diff_providers).map(|_| {
-        view.ensure_cursor_in_view(doc, scrolloff);
-    })?;
-    if let Some(path) = doc.path().map(ToOwned::to_owned) {
+    let (doc_id, path) = {
+        let (view, doc) = current!(cx.editor);
+        doc.reload(view).map(|_| {
+            view.ensure_cursor_in_view(doc, scrolloff);
+        })?;
+        (doc.id(), doc.path().map(ToOwned::to_owned))
+    };
+    if let Some(path) = path {
+        cx.editor.queue_vcs_refresh(doc_id, path.clone());
         cx.editor
             .language_servers
             .file_event_handler
@@ -1628,38 +1632,43 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         .collect();
 
     for (doc_id, view_ids) in docs_view_ids {
-        let doc = doc_mut!(cx.editor, &doc_id);
+        let path = {
+            let doc = doc_mut!(cx.editor, &doc_id);
 
-        // Every doc is guaranteed to have at least 1 view at this point.
-        let view = view_mut!(cx.editor, view_ids[0]);
+            // Every doc is guaranteed to have at least 1 view at this point.
+            let view = view_mut!(cx.editor, view_ids[0]);
 
-        // Ensure that the view is synced with the document's history.
-        view.sync_changes(doc);
+            // Ensure that the view is synced with the document's history.
+            view.sync_changes(doc);
 
-        if let Err(error) = doc.reload(view, &cx.editor.diff_providers) {
-            cx.editor.set_error(format!("{}", error));
-            continue;
-        }
+            if let Err(error) = doc.reload(view) {
+                cx.editor.set_error(format!("{}", error));
+                continue;
+            }
 
-        if let Some(path) = doc.path().map(ToOwned::to_owned) {
+            let path = doc.path().map(ToOwned::to_owned);
+
+            for view_id in view_ids {
+                let view = view_mut!(cx.editor, view_id);
+                if view.doc.eq(&doc_id) {
+                    // Reloading commits the diff against disk through the first view
+                    // only (above). Any other view onto this document is left
+                    // pointing at the pre-reload revision, so sync it now; otherwise
+                    // its jumplist entries keep referencing the old (e.g. larger)
+                    // text and a later commit panics when mapping them through a
+                    // changeset whose pre-image no longer contains them.
+                    view.sync_changes(doc);
+                    view.ensure_cursor_in_view(doc, scrolloff);
+                }
+            }
+            path
+        };
+        if let Some(path) = path {
+            cx.editor.queue_vcs_refresh(doc_id, path.clone());
             cx.editor
                 .language_servers
                 .file_event_handler
                 .file_changed(path);
-        }
-
-        for view_id in view_ids {
-            let view = view_mut!(cx.editor, view_id);
-            if view.doc.eq(&doc_id) {
-                // Reloading commits the diff against disk through the first view
-                // only (above). Any other view onto this document is left
-                // pointing at the pre-reload revision, so sync it now; otherwise
-                // its jumplist entries keep referencing the old (e.g. larger)
-                // text and a later commit panics when mapping them through a
-                // changeset whose pre-image no longer contains them.
-                view.sync_changes(doc);
-                view.ensure_cursor_in_view(doc, scrolloff);
-            }
         }
     }
 

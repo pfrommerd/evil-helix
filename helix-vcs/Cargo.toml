@@ -15,7 +15,6 @@ helix-event = { path = "../helix-event" }
 
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "parking_lot", "macros"] }
 parking_lot.workspace = true
-arc-swap.workspace = true
 
 imara-diff =  "0.2.0"
 anyhow = "1"

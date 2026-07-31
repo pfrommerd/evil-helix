@@ -16,7 +16,7 @@ use crate::{
 };
 use helix_event::dispatch;
 use helix_loader::workspace_trust::{ImplicitTrustLevel, TrustQuery, WorkspaceTrust};
-use helix_vcs::DiffProviderRegistry;
+use helix_vcs::{DiffProviderRegistry, FileInfo};
 
 use futures_util::stream::select_all::SelectAll;
 use futures_util::StreamExt;
@@ -1477,6 +1477,12 @@ pub struct Editor {
     pub language_servers: helix_lsp::Registry,
     pub diagnostics: Diagnostics,
     pub diff_providers: DiffProviderRegistry,
+    vcs_refreshes: (
+        UnboundedSender<VcsRefreshResult>,
+        UnboundedReceiver<VcsRefreshResult>,
+    ),
+    vcs_refresh_tokens: HashMap<DocumentId, u64>,
+    next_vcs_refresh_token: u64,
 
     pub debug_adapters: dap::registry::Registry,
     pub breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
@@ -1541,6 +1547,15 @@ pub enum EditorEvent {
     DebuggerEvent((DebugAdapterId, dap::Payload)),
     IdleTimer,
     Redraw,
+    VcsRefresh,
+}
+
+#[derive(Debug)]
+struct VcsRefreshResult {
+    document_id: DocumentId,
+    path: PathBuf,
+    token: u64,
+    info: FileInfo,
 }
 
 #[derive(Debug, Clone)]
@@ -1647,6 +1662,9 @@ impl Editor {
             language_servers,
             diagnostics: Diagnostics::new(),
             diff_providers: DiffProviderRegistry::default(),
+            vcs_refreshes: unbounded_channel(),
+            vcs_refresh_tokens: HashMap::new(),
+            next_vcs_refresh_token: 0,
             debug_adapters: dap::registry::Registry::new(),
             breakpoints: HashMap::new(),
             syn_loader,
@@ -2324,12 +2342,8 @@ impl Editor {
                 Editor::doc_diagnostics(&self.language_servers, &self.diagnostics, &doc);
             doc.replace_diagnostics(diagnostics, &[], None);
 
-            if let Some(diff_base) = self.diff_providers.get_diff_base(&path) {
-                doc.set_diff_base(diff_base);
-            }
-            doc.set_version_control_head(self.diff_providers.get_current_head_name(&path));
-
             let id = self.new_document(doc);
+            self.queue_vcs_refresh(id, path.clone());
             self.launch_language_servers(id);
 
             helix_event::dispatch(DocumentDidOpen {
@@ -2343,6 +2357,40 @@ impl Editor {
         self.switch(id, action);
 
         Ok(id)
+    }
+
+    /// Queue a snapshot-free VCS lookup for a document without blocking editor work.
+    pub fn queue_vcs_refresh(&mut self, document_id: DocumentId, path: PathBuf) {
+        self.next_vcs_refresh_token = self
+            .next_vcs_refresh_token
+            .checked_add(1)
+            .expect("VCS refresh token overflow");
+        let token = self.next_vcs_refresh_token;
+        self.vcs_refresh_tokens.insert(document_id, token);
+        let providers = self.diff_providers.clone();
+        let sender = self.vcs_refreshes.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let info = providers.get_file_info(&path);
+            let _ = sender.send(VcsRefreshResult {
+                document_id,
+                path,
+                token,
+                info,
+            });
+        });
+    }
+
+    fn apply_vcs_refresh(&mut self, result: VcsRefreshResult) {
+        let latest_token = self.vcs_refresh_tokens.get(&result.document_id).copied();
+        let current_path = self
+            .documents
+            .get(&result.document_id)
+            .and_then(Document::path);
+        if !vcs_refresh_is_current(latest_token, current_path, &result) {
+            return;
+        }
+        let doc = self.documents.get_mut(&result.document_id).unwrap();
+        doc.replace_vcs_metadata(result.info);
     }
 
     pub fn close(&mut self, id: ViewId) {
@@ -2365,6 +2413,7 @@ impl Editor {
 
         // This will also disallow any follow-up writes
         self.saves.remove(&doc_id);
+        self.vcs_refresh_tokens.remove(&doc_id);
 
         enum Action {
             Close(ViewId),
@@ -2680,6 +2729,10 @@ impl Editor {
                 Some(config_event) = self.config_events.1.recv() => {
                     return EditorEvent::ConfigEvent(config_event)
                 }
+                Some(result) = self.vcs_refreshes.1.recv() => {
+                    self.apply_vcs_refresh(result);
+                    return EditorEvent::VcsRefresh
+                }
                 Some(message) = self.language_servers.incoming.next() => {
                     return EditorEvent::LanguageServerMessage(message)
                 }
@@ -2834,6 +2887,56 @@ impl Editor {
         let (view, doc) = current!(self);
         doc.set_selection(view_id, selection);
         view.ensure_cursor_in_view_center(doc, self.config.load().scrolloff);
+    }
+}
+
+fn vcs_refresh_is_current(
+    latest_token: Option<u64>,
+    current_path: Option<&Path>,
+    result: &VcsRefreshResult,
+) -> bool {
+    latest_token == Some(result.token) && current_path == Some(result.path.as_path())
+}
+
+#[cfg(test)]
+mod vcs_refresh_tests {
+    use super::*;
+
+    fn result(token: u64, path: &str) -> VcsRefreshResult {
+        VcsRefreshResult {
+            document_id: DocumentId::default(),
+            path: PathBuf::from(path),
+            token,
+            info: FileInfo::default(),
+        }
+    }
+
+    #[test]
+    fn only_newest_matching_refresh_is_current() {
+        let current = result(2, "/workspace/file");
+        assert!(vcs_refresh_is_current(
+            Some(2),
+            Some(Path::new("/workspace/file")),
+            &current
+        ));
+
+        let old = result(1, "/workspace/file");
+        assert!(!vcs_refresh_is_current(
+            Some(2),
+            Some(Path::new("/workspace/file")),
+            &old
+        ));
+    }
+
+    #[test]
+    fn refresh_for_closed_or_renamed_document_is_not_current() {
+        let completion = result(1, "/workspace/old");
+        assert!(!vcs_refresh_is_current(Some(1), None, &completion));
+        assert!(!vcs_refresh_is_current(
+            Some(1),
+            Some(Path::new("/workspace/new")),
+            &completion
+        ));
     }
 }
 

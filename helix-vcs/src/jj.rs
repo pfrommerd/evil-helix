@@ -1,34 +1,32 @@
 //! Jujutsu integration through the public command-line interface.
 //!
-//! Read commands are pinned to the latest operation and explicitly ignore the working copy. This
-//! keeps querying the editor UI from creating surprise snapshots. Call [`snapshot`] at deliberate
-//! refresh points instead.
+//! Read commands are pinned to an operation and explicitly ignore the working copy. This keeps
+//! querying the editor UI from creating surprise snapshots.
 
 use std::{
     ffi::OsStr,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
-use arc_swap::ArcSwap;
 use serde::Deserialize;
 
-use crate::FileChange;
+use crate::{FileChange, FileInfo};
 
 // `jj status` has no template interface. `jj diff --template` exposes changed-path metadata
 // through structured `TreeDiffEntry` records without rendering file hunks.
 const STATUS_TEMPLATE: &str = r#""{\"path\":" ++ stringify(self.path()).escape_json() ++ ",\"status\":" ++ self.status().escape_json() ++ ",\"source_path\":" ++ stringify(self.source().path()).escape_json() ++ ",\"source_type\":" ++ self.source().file_type().escape_json() ++ ",\"target_type\":" ++ self.target().file_type().escape_json() ++ "}\n""#;
 
-fn command(repository: &Path) -> Command {
+fn command(repository: &Path, operation: &OsStr) -> Command {
     let mut command = Command::new("jj");
     command
         .arg("--repository")
         .arg(repository)
         .current_dir(repository)
-        .arg("--at-op=@")
+        .arg("--at-op")
+        .arg(operation)
         .arg("--ignore-working-copy")
         .arg("--quiet")
         .arg("--no-pager")
@@ -63,8 +61,8 @@ fn workspace_root(start: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(root))
 }
 
-fn run_read(repository: &Path, args: &[&OsStr]) -> Result<Vec<u8>> {
-    let output = command(repository)
+fn run_read(repository: &Path, operation: &OsStr, args: &[&OsStr]) -> Result<Vec<u8>> {
+    let output = command(repository, operation)
         .args(args)
         .output()
         .context("failed to invoke jj")?;
@@ -78,28 +76,30 @@ fn run_read(repository: &Path, args: &[&OsStr]) -> Result<Vec<u8>> {
     }
 }
 
-/// Explicitly synchronize the working copy. Unlike all read queries, this intentionally may
-/// create a jj operation when files changed.
-pub fn snapshot(repository: &Path) -> Result<()> {
-    let repository = workspace_root(repository)?;
-    let output = Command::new("jj")
-        .arg("--repository")
-        .arg(&repository)
-        .current_dir(&repository)
-        .arg("--quiet")
-        .arg("--no-pager")
-        .arg("--color=never")
-        .args(["util", "snapshot"])
+fn operation_id(repository: &Path) -> Result<Vec<u8>> {
+    let output = command(repository, OsStr::new("@"))
+        .args([
+            "op",
+            "log",
+            "--no-graph",
+            "--limit",
+            "1",
+            "--template",
+            "self.id()",
+        ])
         .output()
-        .context("failed to invoke jj util snapshot")?;
-    if output.status.success() {
-        Ok(())
-    } else {
+        .context("failed to resolve jj operation")?;
+    if !output.status.success() {
         bail!(
-            "jj util snapshot failed: {}",
+            "jj op log failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        )
+        );
     }
+    let id = output.stdout;
+    if id.is_empty() {
+        bail!("jj op log returned an empty operation ID");
+    }
+    Ok(id)
 }
 
 fn canonical_file(file: &Path) -> Result<PathBuf> {
@@ -110,218 +110,17 @@ fn canonical_file(file: &Path) -> Result<PathBuf> {
     Ok(file)
 }
 
-pub fn get_diff_base(file: &Path) -> Result<Vec<u8>> {
+pub fn get_file_info(file: &Path) -> Result<FileInfo> {
     let file = canonical_file(file)?;
     let directory = file.parent().context("file has no parent directory")?;
     let repository = workspace_root(directory)?;
     let path = file
         .strip_prefix(&repository)
         .context("file is outside jj workspace")?;
-    let current = run_read(
-        &repository,
-        &[
-            OsStr::new("file"),
-            OsStr::new("show"),
-            OsStr::new("--revision"),
-            OsStr::new("@"),
-            OsStr::new("--"),
-            path.as_os_str(),
-        ],
-    )?;
-    let patch = run_read(
-        &repository,
-        &[
-            OsStr::new("diff"),
-            OsStr::new("--revision"),
-            OsStr::new("@"),
-            OsStr::new("--git"),
-            OsStr::new("--context=0"),
-            OsStr::new("--"),
-            path.as_os_str(),
-        ],
-    )?;
-    reverse_patch(&current, &patch)
-}
-
-#[derive(Debug)]
-struct PatchHunk {
-    old_count: usize,
-    new_start: usize,
-    new_count: usize,
-    lines: Vec<Vec<u8>>,
-}
-
-/// Reconstruct the parent-side file content by applying a zero-context Git patch backwards.
-///
-/// `jj diff -r @` lets jj compare the current working-copy commit with the automatic merge of
-/// all of its parents, which is important for merge commits. We retain Helix's internal differ
-/// by applying that patch to the persisted `@` content rather than to the editor buffer (which
-/// may contain unsaved edits).
-fn reverse_patch(current: &[u8], patch: &[u8]) -> Result<Vec<u8>> {
-    if patch
-        .split_inclusive(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch"))
-    {
-        bail!("jj returned a binary patch");
-    }
-
-    let hunks = parse_patch_hunks(patch)?;
-    let current_lines = split_lines(current);
-    let mut base = Vec::with_capacity(current.len());
-    let mut current_index = 0;
-
-    for hunk in hunks {
-        // Unified diff uses `+0,0` for deletion-only hunks at the start of a file.
-        let hunk_start = hunk.new_start.saturating_sub(1);
-        if hunk_start < current_index || hunk_start > current_lines.len() {
-            bail!("jj patch hunks are out of order or outside the current file");
-        }
-        for line in &current_lines[current_index..hunk_start] {
-            base.extend_from_slice(line);
-        }
-        current_index = hunk_start;
-
-        let mut old_count = 0;
-        let mut new_count = 0;
-        for line in hunk.lines {
-            let (kind, content) = line.split_first().context("empty line in jj patch hunk")?;
-            match kind {
-                b'-' => {
-                    base.extend_from_slice(content);
-                    old_count += 1;
-                }
-                b'+' => {
-                    let target = current_lines
-                        .get(current_index)
-                        .context("jj patch adds past the end of the current file")?;
-                    if *target != content {
-                        bail!("jj patch does not match the current file content");
-                    }
-                    current_index += 1;
-                    new_count += 1;
-                }
-                b' ' => {
-                    let target = current_lines
-                        .get(current_index)
-                        .context("jj patch context is past the end of the current file")?;
-                    if *target != content {
-                        bail!("jj patch context does not match the current file content");
-                    }
-                    base.extend_from_slice(content);
-                    current_index += 1;
-                    old_count += 1;
-                    new_count += 1;
-                }
-                _ => bail!("unsupported line in jj patch hunk"),
-            }
-        }
-        if old_count != hunk.old_count || new_count != hunk.new_count {
-            bail!("jj patch hunk line counts do not match its header");
-        }
-    }
-    for line in &current_lines[current_index..] {
-        base.extend_from_slice(line);
-    }
-    Ok(base)
-}
-
-fn split_lines(contents: &[u8]) -> Vec<&[u8]> {
-    contents
-        .split_inclusive(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .collect()
-}
-
-fn parse_patch_hunks(patch: &[u8]) -> Result<Vec<PatchHunk>> {
-    let lines = patch
-        .split_inclusive(|byte| *byte == b'\n')
-        .collect::<Vec<_>>();
-    let mut hunks = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        if !line.starts_with(b"@@ ") {
-            index += 1;
-            continue;
-        }
-        let (old_count, new_start, new_count) = parse_hunk_header(line)?;
-        index += 1;
-        let mut hunk_lines: Vec<Vec<u8>> = Vec::new();
-        while let Some(line) = lines.get(index) {
-            if line.starts_with(b"@@ ") || line.starts_with(b"diff --git ") {
-                break;
-            }
-            if line.starts_with(b"\\ No newline at end of file") {
-                let previous = hunk_lines
-                    .last_mut()
-                    .context("jj newline marker has no preceding hunk line")?;
-                if previous.pop() != Some(b'\n') {
-                    bail!("jj newline marker does not follow a newline-terminated hunk line");
-                }
-                index += 1;
-                continue;
-            }
-            if matches!(line.first(), Some(b'+' | b'-' | b' ')) {
-                hunk_lines.push((*line).to_vec());
-                index += 1;
-                continue;
-            }
-            bail!("unexpected line in jj patch hunk");
-        }
-        hunks.push(PatchHunk {
-            old_count,
-            new_start,
-            new_count,
-            lines: hunk_lines,
-        });
-    }
-    Ok(hunks)
-}
-
-fn parse_hunk_header(header: &[u8]) -> Result<(usize, usize, usize)> {
-    let header = std::str::from_utf8(header).context("jj patch header is not UTF-8")?;
-    let mut fields = header.split_whitespace();
-    if fields.next() != Some("@@") {
-        bail!("invalid jj patch hunk header");
-    }
-    let old = fields
-        .next()
-        .context("missing old range in jj patch hunk")?;
-    let new = fields
-        .next()
-        .context("missing new range in jj patch hunk")?;
-    if fields.next() != Some("@@") {
-        bail!("invalid jj patch hunk header terminator");
-    }
-    let (_, old_count) = parse_hunk_range(old, '-')?;
-    let (new_start, new_count) = parse_hunk_range(new, '+')?;
-    Ok((old_count, new_start, new_count))
-}
-
-fn parse_hunk_range(range: &str, prefix: char) -> Result<(usize, usize)> {
-    let range = range
-        .strip_prefix(prefix)
-        .context("invalid jj patch hunk range prefix")?;
-    let (start, count) = match range.split_once(',') {
-        Some((start, count)) => (start, count),
-        None => (range, "1"),
-    };
-    Ok((
-        start.parse().context("invalid jj patch hunk line number")?,
-        count.parse().context("invalid jj patch hunk line count")?,
-    ))
-}
-
-#[derive(Deserialize)]
-struct WorkingCopy {
-    change_id: String,
-}
-
-pub fn get_current_head_name(file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
-    let file = canonical_file(file)?;
-    let repository = workspace_root(file.parent().context("file has no parent directory")?)?;
+    let operation = operation_id(&repository)?;
     let output = run_read(
         &repository,
+        OsStr::new(std::str::from_utf8(&operation).context("jj operation ID is not UTF-8")?),
         &[
             OsStr::new("log"),
             OsStr::new("--no-graph"),
@@ -333,8 +132,73 @@ pub fn get_current_head_name(file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
     )?;
     let working_copy: WorkingCopy =
         serde_json::from_slice(&output).context("parse jj log template")?;
-    let name = working_copy.change_id.chars().take(8).collect::<String>();
-    Ok(Arc::new(ArcSwap::from_pointee(name.into_boxed_str())))
+    let head_name = Some(
+        working_copy
+            .change_id
+            .chars()
+            .take(8)
+            .collect::<String>()
+            .into_boxed_str(),
+    );
+    let diff_base = if working_copy.parents.len() != 1 {
+        None
+    } else {
+        let operation = OsStr::new(std::str::from_utf8(&operation).unwrap());
+        let parent = OsStr::new(&working_copy.parents[0]);
+        match parent_file(&repository, operation, parent, path) {
+            Ok(base) => Some(base),
+            Err(err) => {
+                log::debug!("failed to read jj parent file {}: {err:#}", path.display());
+                None
+            }
+        }
+    };
+    Ok(FileInfo {
+        diff_base,
+        head_name,
+    })
+}
+
+fn parent_file(
+    repository: &Path,
+    operation: &OsStr,
+    parent: &OsStr,
+    path: &Path,
+) -> Result<Vec<u8>> {
+    let listed = run_read(
+        repository,
+        operation,
+        &[
+            OsStr::new("file"),
+            OsStr::new("list"),
+            OsStr::new("--revision"),
+            parent,
+            OsStr::new("--"),
+            path.as_os_str(),
+        ],
+    )?;
+    if listed.is_empty() {
+        Ok(Vec::new())
+    } else {
+        run_read(
+            repository,
+            operation,
+            &[
+                OsStr::new("file"),
+                OsStr::new("show"),
+                OsStr::new("--revision"),
+                parent,
+                OsStr::new("--"),
+                path.as_os_str(),
+            ],
+        )
+    }
+}
+
+#[derive(Deserialize)]
+struct WorkingCopy {
+    change_id: String,
+    parents: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -367,7 +231,7 @@ pub fn for_each_changed_file(
             }
         }
     }
-    let mut child = command(&repository)
+    let mut child = command(&repository, OsStr::new("@"))
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -469,7 +333,62 @@ mod tests {
     }
 
     #[test]
-    fn reads_parent_base_and_structured_changed_paths() {
+    fn reads_persisted_parent_base_and_change_id_without_snapshotting() {
+        let repository = repository();
+        let file = repository.path().join("tracked.txt");
+        fs::write(&file, "base\n").unwrap();
+        run_jj(repository.path(), &["file", "track", "tracked.txt"]);
+        run_jj(repository.path(), &["describe", "--message", "base"]);
+        run_jj(repository.path(), &["new"]);
+
+        fs::write(&file, "changed\n").unwrap();
+        let before = operation_id(repository.path()).unwrap();
+        let info = get_file_info(&file).unwrap();
+        let after = operation_id(repository.path()).unwrap();
+
+        assert_eq!(info.diff_base.unwrap(), b"base\n");
+        assert_eq!(info.head_name.as_deref().unwrap().len(), 8);
+        assert_eq!(before, after, "VCS reads must not create a jj operation");
+    }
+
+    #[test]
+    fn missing_parent_file_has_empty_base() {
+        let repository = repository();
+        run_jj(repository.path(), &["new"]);
+        let file = repository.path().join("added.txt");
+        fs::write(&file, "added\n").unwrap();
+
+        let info = get_file_info(&file).unwrap();
+        assert_eq!(info.diff_base, Some(Vec::new()));
+        assert!(info.head_name.is_some());
+    }
+
+    #[test]
+    fn merge_has_change_id_but_no_diff_base() {
+        let repository = repository();
+        let file = repository.path().join("tracked.txt");
+        fs::write(&file, "base\n").unwrap();
+        run_jj(repository.path(), &["file", "track", "tracked.txt"]);
+        run_jj(repository.path(), &["describe", "--message", "left"]);
+        run_jj(
+            repository.path(),
+            &["bookmark", "create", "left", "--revision", "@"],
+        );
+        run_jj(repository.path(), &["new", "root()"]);
+        run_jj(repository.path(), &["describe", "--message", "right"]);
+        run_jj(
+            repository.path(),
+            &["bookmark", "create", "right", "--revision", "@"],
+        );
+        run_jj(repository.path(), &["new", "left", "right"]);
+
+        let info = get_file_info(&file).unwrap();
+        assert!(info.diff_base.is_none());
+        assert_eq!(info.head_name.as_deref().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn reads_structured_changed_paths() {
         let repository = repository();
         let file = repository.path().join("tracked.txt");
         fs::write(&file, "base\n").unwrap();
@@ -479,9 +398,7 @@ mod tests {
 
         fs::write(&file, "changed\n").unwrap();
         fs::write(repository.path().join("added.txt"), "added\n").unwrap();
-        snapshot(repository.path()).unwrap();
-
-        assert_eq!(get_diff_base(&file).unwrap(), b"base\n");
+        run_jj(repository.path(), &["util", "snapshot"]);
 
         let changes = std::sync::Mutex::new(Vec::new());
         for_each_changed_file(repository.path(), &[], |change| {
@@ -494,47 +411,5 @@ mod tests {
             .iter()
             .any(|change| matches!(change, FileChange::Modified { path } if path == &file)));
         assert!(changes.iter().any(|change| matches!(change, FileChange::Untracked { path } if path == &repository.path().join("added.txt"))));
-    }
-
-    #[test]
-    fn reverse_patch_reconstructs_multihunk_base() {
-        let current = b"one\nchanged\nthree\nnew\n";
-        let patch = b"diff --git a/file b/file\n\
-index 4cb29ea38f..92e218fd46 100644\n\
---- a/file\n\
-+++ b/file\n\
-@@ -2,1 +2,1 @@\n\
--two\n\
-+changed\n\
-@@ -3,0 +4,1 @@\n\
-+new\n";
-        assert_eq!(reverse_patch(current, patch).unwrap(), b"one\ntwo\nthree\n");
-    }
-
-    #[test]
-    fn reverse_patch_handles_added_files_and_crlf() {
-        let added_patch = b"diff --git a/file b/file\n\
-new file mode 100644\n\
---- /dev/null\n\
-+++ b/file\n\
-@@ -0,0 +1,2 @@\n\
-+brand\n\
-+new\n";
-        assert_eq!(reverse_patch(b"brand\nnew\n", added_patch).unwrap(), b"");
-
-        let crlf_patch = b"@@ -2,1 +2,1 @@\n-two\r\n+changed\r\n";
-        assert_eq!(
-            reverse_patch(b"one\r\nchanged\r\n", crlf_patch).unwrap(),
-            b"one\r\ntwo\r\n"
-        );
-
-        let no_newline_patch = b"@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n";
-        assert_eq!(reverse_patch(b"new\n", no_newline_patch).unwrap(), b"old");
-    }
-
-    #[test]
-    fn reverse_patch_rejects_invalid_or_binary_patches() {
-        assert!(reverse_patch(b"new\n", b"@@ -1,1 +1,1 @@\n-old\n+other\n").is_err());
-        assert!(reverse_patch(b"", b"Binary files a/file and b/file differ\n").is_err());
     }
 }

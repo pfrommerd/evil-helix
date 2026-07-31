@@ -15,7 +15,7 @@ use helix_core::text_annotations::{InlineAnnotation, Overlay};
 use helix_event::TaskController;
 use helix_lsp::util::lsp_pos_to_pos;
 use helix_stdx::faccess::{copy_metadata, readonly};
-use helix_vcs::{DiffHandle, DiffProviderRegistry};
+use helix_vcs::DiffHandle;
 use once_cell::sync::OnceCell;
 use thiserror;
 
@@ -1294,11 +1294,7 @@ impl Document {
     }
 
     /// Reload the document from its path.
-    pub fn reload(
-        &mut self,
-        view: &mut View,
-        provider_registry: &DiffProviderRegistry,
-    ) -> Result<(), Error> {
+    pub fn reload(&mut self, view: &mut View) -> Result<(), Error> {
         let encoding = self.encoding;
         let path = match self.path() {
             None => return Ok(()),
@@ -1323,13 +1319,6 @@ impl Document {
         self.reset_modified();
         self.pickup_last_saved_time();
         self.detect_indent_and_line_ending();
-
-        match provider_registry.get_diff_base(&path) {
-            Some(diff_base) => self.set_diff_base(diff_base),
-            None => self.diff_handle = None,
-        }
-
-        self.version_control_head = provider_registry.get_current_head_name(&path);
 
         Ok(())
     }
@@ -2039,6 +2028,32 @@ impl Document {
         } else {
             self.diff_handle = None;
         }
+    }
+
+    /// Clear the asynchronously resolved VCS diff base.
+    pub fn clear_diff_base(&mut self) {
+        self.diff_handle = None;
+    }
+
+    /// Clear all asynchronously resolved VCS metadata.
+    pub fn clear_vcs_metadata(&mut self) {
+        self.clear_diff_base();
+        self.version_control_head = None;
+    }
+
+    /// Atomically replace all asynchronously resolved VCS metadata.
+    pub fn replace_vcs_metadata(&mut self, info: helix_vcs::FileInfo) {
+        if info.diff_base.is_none() && info.head_name.is_none() {
+            self.clear_vcs_metadata();
+            return;
+        }
+        match info.diff_base {
+            Some(diff_base) => self.set_diff_base(diff_base),
+            None => self.clear_diff_base(),
+        }
+        self.version_control_head = info
+            .head_name
+            .map(|name| Arc::new(ArcSwap::from_pointee(name)));
     }
 
     pub fn version_control_head(&self) -> Option<Arc<Box<str>>> {

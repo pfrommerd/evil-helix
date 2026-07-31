@@ -3,11 +3,7 @@
 //! editor to a particular `jj-lib` build or storage backend.
 
 use anyhow::{anyhow, bail, Result};
-use arc_swap::ArcSwap;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 mod jj;
 
@@ -19,6 +15,15 @@ mod status;
 
 pub use status::FileChange;
 
+/// Version-control metadata resolved for one file at one consistent repository operation.
+#[derive(Debug, Default)]
+pub struct FileInfo {
+    /// Parent content used as the document diff base, when a single parent exists.
+    pub diff_base: Option<Vec<u8>>,
+    /// Short, stable label for the working-copy change.
+    pub head_name: Option<Box<str>>,
+}
+
 /// Contains all active diff providers.
 #[derive(Clone)]
 pub struct DiffProviderRegistry {
@@ -26,45 +31,21 @@ pub struct DiffProviderRegistry {
 }
 
 impl DiffProviderRegistry {
-    /// Explicitly refresh jj's persisted working-copy state. Read queries never snapshot.
-    pub fn snapshot_working_copy(self, cwd: PathBuf) {
-        tokio::task::spawn_blocking(move || {
-            if let Err(err) = jj::snapshot(&cwd) {
-                log::debug!(
-                    "failed to snapshot jj working copy in {}: {err:#}",
-                    cwd.display()
-                );
-            }
-        });
-    }
-
-    /// Get the given file from the VCS. This provides the unedited document as a "base"
-    /// for a diff to be created.
-    pub fn get_diff_base(&self, file: &Path) -> Option<Vec<u8>> {
+    /// Resolve all VCS metadata for a file in one operation-consistent lookup.
+    ///
+    /// This is synchronous and intended to be called from `spawn_blocking`.
+    pub fn get_file_info(&self, file: &Path) -> FileInfo {
         self.providers
             .iter()
-            .find_map(|provider| match provider.get_diff_base(file) {
+            .find_map(|provider| match provider.get_file_info(file) {
                 Ok(res) => Some(res),
                 Err(err) => {
                     log::debug!("{err:#?}");
-                    log::debug!("failed to open diff base for {}", file.display());
+                    log::debug!("failed to obtain VCS metadata for {}", file.display());
                     None
                 }
             })
-    }
-
-    /// Get a display label for the current working-copy change.
-    pub fn get_current_head_name(&self, file: &Path) -> Option<Arc<ArcSwap<Box<str>>>> {
-        self.providers
-            .iter()
-            .find_map(|provider| match provider.get_current_head_name(file) {
-                Ok(res) => Some(res),
-                Err(err) => {
-                    log::debug!("{err:#?}");
-                    log::debug!("failed to obtain current head name for {}", file.display());
-                    None
-                }
-            })
+            .unwrap_or_default()
     }
 
     /// Fire-and-forget changed file iteration. Runs everything in a background task. Keeps
@@ -75,12 +56,6 @@ impl DiffProviderRegistry {
         f: impl Fn(Result<FileChange>) -> bool + Send + 'static,
     ) {
         tokio::task::spawn_blocking(move || {
-            // The picker is an explicit freshness boundary. Keep the subsequent status query
-            // operation-pinned and snapshot-free.
-            if let Err(err) = jj::snapshot(&cwd) {
-                f(Err(err));
-                return;
-            }
             if self
                 .providers
                 .iter()
@@ -129,19 +104,9 @@ enum DiffProvider {
 }
 
 impl DiffProvider {
-    fn get_diff_base(&self, file: &Path) -> Result<Vec<u8>> {
+    fn get_file_info(&self, file: &Path) -> Result<FileInfo> {
         match self {
-            Self::Jj => jj::get_diff_base(file),
-            Self::None => {
-                let _ = file;
-                bail!("No diff support compiled in")
-            }
-        }
-    }
-
-    fn get_current_head_name(&self, file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
-        match self {
-            Self::Jj => jj::get_current_head_name(file),
+            Self::Jj => jj::get_file_info(file),
             Self::None => {
                 let _ = file;
                 bail!("No diff support compiled in")
